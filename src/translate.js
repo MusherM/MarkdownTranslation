@@ -313,7 +313,8 @@ async function translateBatch({
   glossaryEntries,
   missingEntries,
   config,
-  prompt
+  prompt,
+  logger
 }) {
   const normalizedSegments = normalizeSegmentItems(segments);
   const payload = buildUserPayload({
@@ -333,41 +334,93 @@ async function translateBatch({
     }
   ];
 
-  const content = await chatCompletion({
-    baseUrl: config.base_url,
-    apiKey: config.api_key,
-    model: config.model,
-    messages,
-    temperature: config.temperature,
-    max_tokens: config.max_tokens
-  });
+  let content;
+  try {
+    content = await chatCompletion({
+      baseUrl: config.base_url,
+      apiKey: config.api_key,
+      model: config.model,
+      messages,
+      temperature: config.temperature,
+      max_tokens: config.max_tokens
+    });
+  } catch (error) {
+    if (logger) {
+      await logger.error('chat_completion_failed', {
+        type: 'translation',
+        error: error.message || String(error),
+        request: { messages }
+      });
+    }
+    throw error;
+  }
 
-  const parsed = parseModelResponse(content);
+  let parsed;
+  try {
+    parsed = parseModelResponse(content);
+  } catch (error) {
+    if (logger) {
+      await logger.error('parse_translation_response_failed', {
+        type: 'translation',
+        error: error.message || String(error),
+        request: { messages },
+        response: content
+      });
+    }
+    throw error;
+  }
   const normalized = normalizeTranslations(parsed, normalizedSegments);
   const translations = normalized.translations.map((item) =>
     typeof item === 'string' ? item : String(item ?? '')
   );
 
   if (normalized.missingIds && normalized.missingIds.length > 0) {
-    throw buildCountMismatchError({
+    const error = buildCountMismatchError({
       expected: normalizedSegments.length,
       actual: translations.filter((item) => item !== undefined).length,
       missingIds: normalized.missingIds
     });
+    if (logger) {
+      await logger.error('translation_count_mismatch', {
+        type: 'translation',
+        error: error.message,
+        request: { messages },
+        response: content
+      });
+    }
+    throw error;
   }
 
   if (translations.length !== normalizedSegments.length) {
-    throw buildCountMismatchError({
+    const error = buildCountMismatchError({
       expected: normalizedSegments.length,
       actual: translations.length
     });
+    if (logger) {
+      await logger.error('translation_count_mismatch', {
+        type: 'translation',
+        error: error.message,
+        request: { messages },
+        response: content
+      });
+    }
+    throw error;
   }
 
   if (translations.some((item) => item === undefined)) {
-    throw buildCountMismatchError({
+    const error = buildCountMismatchError({
       expected: normalizedSegments.length,
       actual: translations.filter((item) => item !== undefined).length
     });
+    if (logger) {
+      await logger.error('translation_count_mismatch', {
+        type: 'translation',
+        error: error.message,
+        request: { messages },
+        response: content
+      });
+    }
+    throw error;
   }
 
   return translations;
@@ -376,7 +429,8 @@ async function translateBatch({
 async function judgeGlossaryTranslations({
   items,
   config,
-  judgePrompt
+  judgePrompt,
+  logger
 }) {
   if (!judgePrompt || items.length === 0) {
     return new Map();
@@ -397,16 +451,41 @@ async function judgeGlossaryTranslations({
     }
   ];
 
-  const content = await chatCompletion({
-    baseUrl: config.base_url,
-    apiKey: config.api_key,
-    model: config.model,
-    messages,
-    temperature: config.temperature,
-    max_tokens: config.max_tokens
-  });
+  let content;
+  try {
+    content = await chatCompletion({
+      baseUrl: config.base_url,
+      apiKey: config.api_key,
+      model: config.model,
+      messages,
+      temperature: config.temperature,
+      max_tokens: config.max_tokens
+    });
+  } catch (error) {
+    if (logger) {
+      await logger.error('chat_completion_failed', {
+        type: 'glossary_judge',
+        error: error.message || String(error),
+        request: { messages }
+      });
+    }
+    throw new Error(`Glossary judge request failed: ${error.message}`);
+  }
 
-  const parsed = parseModelResponse(content);
+  let parsed;
+  try {
+    parsed = parseModelResponse(content);
+  } catch (error) {
+    if (logger) {
+      await logger.error('parse_judge_response_failed', {
+        type: 'glossary_judge',
+        error: error.message || String(error),
+        request: { messages },
+        response: content
+      });
+    }
+    throw new Error(`Glossary judge response parse failed: ${error.message}`);
+  }
   if (!parsed || !Array.isArray(parsed.decisions)) {
     throw new Error('Judge response missing decisions array');
   }
@@ -437,11 +516,13 @@ async function translateBatchWithRetries({
   config,
   prompt,
   judgePrompt,
-  translations
+  translations,
+  logger
 }) {
   let pending = [...batchIndices];
   let attempt = 0;
   let missingEntries = [];
+  let lastSuccessful = null;
 
   while (pending.length > 0 && attempt < config.retry_times) {
     attempt += 1;
@@ -459,7 +540,8 @@ async function translateBatchWithRetries({
         glossaryEntries: batchGlossary,
         missingEntries,
         config,
-        prompt
+        prompt,
+        logger
       });
 
       if (batchTranslations.length !== batchSegments.length) {
@@ -468,6 +550,11 @@ async function translateBatchWithRetries({
           actual: batchTranslations.length
         });
       }
+
+      lastSuccessful = {
+        pending: [...pending],
+        translations: batchTranslations
+      };
 
       pending.forEach((index, pos) => {
         translations[index] = batchTranslations[pos];
@@ -498,7 +585,8 @@ async function translateBatchWithRetries({
         const decisions = await judgeGlossaryTranslations({
           items: judgeItems,
           config,
-          judgePrompt
+          judgePrompt,
+          logger
         });
         if (decisions.size > 0) {
           for (const [index, decision] of decisions.entries()) {
@@ -509,6 +597,12 @@ async function translateBatchWithRetries({
         }
       } catch (error) {
         console.warn(`Glossary judge failed. Continuing with retries. Error: ${error.message}`);
+        if (logger) {
+          await logger.warn('glossary_judge_failed', {
+            error: error.message || String(error),
+            items: judgeItems
+          });
+        }
       }
 
       if (missingMap.size === 0) {
@@ -523,15 +617,44 @@ async function translateBatchWithRetries({
       console.warn(`Glossary check failed. Retrying. Missing terms: ${missingList}`);
     } catch (error) {
       if (attempt >= config.retry_times) {
-        throw error;
+        if (isCountMismatchError(error) && batchIndices.length > 1) {
+          throw error;
+        }
+        if (!lastSuccessful) {
+          for (const index of pending) {
+            translations[index] = segments[index].text;
+          }
+        }
+        console.warn('Translation retries exhausted. Using last available translations.');
+        if (logger) {
+          await logger.warn('translation_retries_exhausted', {
+            error: error.message || String(error),
+            pendingCount: pending.length
+          });
+        }
+        pending = [];
+        break;
       }
       console.warn(`Translation attempt failed. Retrying. Error: ${error.message}`);
+      if (logger) {
+        await logger.warn('translation_attempt_failed', {
+          error: error.message || String(error)
+        });
+      }
     }
   }
 
   if (pending.length > 0) {
     const missingList = missingEntries.map((entry) => `${entry.source} -> ${entry.target}`).join(', ');
-    throw new Error(`Glossary check failed after retries. Missing terms: ${missingList}`);
+    console.warn(`Glossary check failed after retries. Using last available translations. Missing terms: ${missingList}`);
+    if (logger) {
+      await logger.warn('glossary_check_failed_after_retries', {
+        missing_terms: missingEntries.map((entry) => ({
+          source: entry.source,
+          target: entry.target
+        }))
+      });
+    }
   }
 }
 
@@ -541,7 +664,8 @@ async function translateSegmentsWithRetries({
   config,
   prompt,
   judgePrompt,
-  onProgress
+  onProgress,
+  logger
 }) {
   const translations = new Array(segments.length);
   const indices = segments
@@ -573,7 +697,8 @@ async function translateSegmentsWithRetries({
         config,
         prompt,
         judgePrompt,
-        translations
+        translations,
+        logger
       });
       doneSegments += batchIndices.length;
       if (onProgress) {
@@ -590,7 +715,8 @@ async function translateSegmentsWithRetries({
             config,
             prompt,
             judgePrompt,
-            translations
+            translations,
+            logger
           });
           doneSegments += 1;
           if (onProgress) {
@@ -606,7 +732,7 @@ async function translateSegmentsWithRetries({
   return translations;
 }
 
-export async function translateMarkdown(source, { config, glossary, prompt, judgePrompt, onProgress }) {
+export async function translateMarkdown(source, { config, glossary, prompt, judgePrompt, onProgress, logger }) {
   const processor = unified()
     .use(remarkParse)
     .use(remarkGfm)
@@ -636,7 +762,8 @@ export async function translateMarkdown(source, { config, glossary, prompt, judg
     config,
     prompt,
     judgePrompt,
-    onProgress
+    onProgress,
+    logger
   });
 
   segments.forEach((segment, index) => {

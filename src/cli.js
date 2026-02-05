@@ -7,6 +7,7 @@ import { loadGlossary } from './glossary.js';
 import { loadPrompt } from './prompt.js';
 import { createProgressBar } from './progress.js';
 import { translateMarkdown } from './translate.js';
+import { createLogger } from './logger.js';
 
 function printUsage() {
   console.log(`Usage: md-translate <input.md|dir> [options]
@@ -79,9 +80,22 @@ function createProgressHandler(label, stream) {
   };
 }
 
-async function translateOneFile({ filePath, outputPath, config, glossary, prompt, judgePrompt, stream }) {
+async function translateOneFile({ filePath, outputPath, config, glossary, prompt, judgePrompt, logger, stream }) {
   const label = path.relative(process.cwd(), filePath) || path.basename(filePath);
   const progress = createProgressHandler(label, stream);
+
+  if (outputPath !== '-') {
+    try {
+      await fs.access(outputPath);
+      console.log(`Skipping existing translation: ${outputPath}`);
+      if (logger) {
+        await logger.info('skip_existing_translation', { outputPath, filePath });
+      }
+      return;
+    } catch {
+      // continue if not exists
+    }
+  }
 
   const source = await fs.readFile(filePath, 'utf8');
   const output = await translateMarkdown(source, {
@@ -89,6 +103,7 @@ async function translateOneFile({ filePath, outputPath, config, glossary, prompt
     glossary,
     prompt,
     judgePrompt,
+    logger,
     onProgress: progress.handle
   });
   progress.finish();
@@ -155,6 +170,7 @@ async function main() {
     loadPrompt(promptPath),
     loadPrompt(judgePromptPath)
   ]);
+  const logger = createLogger(config.log_path);
 
   const inputStat = await fs.stat(inputPath);
 
@@ -189,6 +205,7 @@ async function main() {
         glossary,
         prompt,
         judgePrompt,
+        logger,
         stream: process.stdout
       });
     }
@@ -217,6 +234,7 @@ async function main() {
     glossary,
     prompt,
     judgePrompt,
+    logger,
     stream
   });
 

@@ -9,7 +9,8 @@ const DEFAULTS = {
   temperature: 0.2,
   max_tokens: 2048,
   max_batch_chars: 4000,
-  max_batch_segments: 100
+  max_batch_segments: 100,
+  log_path: 'log.txt'
 };
 
 async function fileExists(filePath) {

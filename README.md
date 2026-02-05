@@ -46,7 +46,8 @@ Create `config.jsonc` (or `config.json`). Example:
   "temperature": 0.2,
   "max_tokens": 2048,
   "max_batch_chars": 4000,
-  "max_batch_segments": 100
+  "max_batch_segments": 100,
+  "log_path": "log.txt"
 }
 ```
 
@@ -62,12 +63,14 @@ Glossary can be inline or via `glossary_path`:
 ```
 
 ## Glossary Rules
-If a source term appears in any translated segment, the output must contain the corresponding target term. When the rule check fails, the tool re-prompts the model with the missing terms. The retry budget is controlled by `retry_times`. If the glossary check keeps failing, the tool asks a glossary-judge prompt whether the translation is still acceptable; if accepted, the translation is kept without further retries.
+If a source term appears in any translated segment, the output must contain the corresponding target term. When the rule check fails, the tool re-prompts the model with the missing terms. The retry budget is controlled by `retry_times`. If the glossary check keeps failing, the tool asks a glossary-judge prompt whether the translation is still acceptable; if accepted, the translation is kept without further retries. If retries are exhausted, the last translation result is used as a fallback.
 
 ## Notes
 - Markdown formatting may be normalized by the serializer, but the document structure is preserved.
 - Code blocks, inline code, and HTML are not translated.
 - A thin green progress bar is shown per document during translation (TTY only).
+- If a translated output file already exists (e.g., `foo.zh.md`), the file is skipped.
+- Failures are logged to `log.txt` by default (including model inputs/outputs for debugging). You can change the path with `log_path`.
 
 ## Prompt
 The base prompt is stored in `prompts/translate.md`. You can override it with `prompt_path` in config.
