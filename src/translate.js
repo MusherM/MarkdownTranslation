@@ -120,7 +120,22 @@ function buildUserPayload({
 }
 
 function buildUserMessage(payload) {
-  return `INPUT JSON:\n${JSON.stringify(payload, null, 2)}\n\nReturn JSON with the exact shape: {\"translations\": [ ... ] }`;
+  return `INPUT JSON:\n${JSON.stringify(payload, null, 2)}\n\nReturn JSON only with the exact shape: {\"translations\": [{\"id\": <id>, \"text\": <translated>}, ...]}.\n- Include one item for every input segment id.\n- If you cannot translate a segment, return the original text as the value of \"text\".`;
+}
+
+function normalizeSegmentItems(segments) {
+  return segments.map((segment, index) => {
+    if (segment && typeof segment === 'object' && 'text' in segment) {
+      return {
+        id: segment.id ?? index,
+        text: String(segment.text ?? '')
+      };
+    }
+    return {
+      id: index,
+      text: String(segment ?? '')
+    };
+  });
 }
 
 function parseModelResponse(content) {
@@ -140,6 +155,92 @@ function parseModelResponse(content) {
     const slice = text.slice(start, end + 1);
     return JSON.parse(slice);
   }
+}
+
+function coerceTranslationText(item) {
+  if (typeof item === 'string') {
+    return item;
+  }
+  if (item && typeof item === 'object') {
+    if (typeof item.text === 'string') {
+      return item.text;
+    }
+    if (typeof item.translation === 'string') {
+      return item.translation;
+    }
+    if (typeof item.value === 'string') {
+      return item.value;
+    }
+  }
+  return String(item ?? '');
+}
+
+function normalizeTranslations(parsed, segmentItems) {
+  if (!parsed || !Array.isArray(parsed.translations)) {
+    throw new Error('Model response missing translations array');
+  }
+
+  const raw = parsed.translations;
+  const expectedIds = segmentItems.map((item) => item.id);
+  const allStrings = raw.every((item) => typeof item === 'string');
+
+  if (allStrings) {
+    return {
+      translations: raw.map((item) => String(item)),
+      missingIds: []
+    };
+  }
+
+  const byId = new Map();
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const id = item.id ?? item.index ?? item.key;
+    const text = item.text ?? item.translation ?? item.value;
+    if (id === undefined || text === undefined) {
+      continue;
+    }
+    const numericId = Number(id);
+    if (!Number.isNaN(numericId)) {
+      byId.set(numericId, String(text));
+    }
+  }
+
+  if (byId.size > 0) {
+    const translations = expectedIds.map((id) => byId.get(id));
+    const missingIds = expectedIds.filter((id, idx) => translations[idx] === undefined);
+    return {
+      translations,
+      missingIds
+    };
+  }
+
+  return {
+    translations: raw.map(coerceTranslationText),
+    missingIds: []
+  };
+}
+
+function buildCountMismatchError({ expected, actual, missingIds }) {
+  const error = new Error('Model returned incorrect number of translations');
+  error.code = 'TRANSLATION_COUNT_MISMATCH';
+  error.expected = expected;
+  error.actual = actual;
+  if (missingIds && missingIds.length > 0) {
+    error.missingIds = missingIds;
+  }
+  return error;
+}
+
+function isCountMismatchError(error) {
+  if (!error) {
+    return false;
+  }
+  if (error.code === 'TRANSLATION_COUNT_MISMATCH') {
+    return true;
+  }
+  return Boolean(error.message && error.message.includes('incorrect number of translations'));
 }
 
 function unionGlossaryEntries(segmentsTerms) {
@@ -191,8 +292,9 @@ async function translateBatch({
   config,
   prompt
 }) {
+  const normalizedSegments = normalizeSegmentItems(segments);
   const payload = buildUserPayload({
-    segments,
+    segments: normalizedSegments,
     glossaryEntries,
     missingEntries
   });
@@ -218,75 +320,147 @@ async function translateBatch({
   });
 
   const parsed = parseModelResponse(content);
-  if (!parsed || !Array.isArray(parsed.translations)) {
-    throw new Error('Model response missing translations array');
+  const normalized = normalizeTranslations(parsed, normalizedSegments);
+  const translations = normalized.translations.map((item) =>
+    typeof item === 'string' ? item : String(item ?? '')
+  );
+
+  if (normalized.missingIds && normalized.missingIds.length > 0) {
+    throw buildCountMismatchError({
+      expected: normalizedSegments.length,
+      actual: translations.filter((item) => item !== undefined).length,
+      missingIds: normalized.missingIds
+    });
   }
 
-  return parsed.translations.map((item) => (typeof item === 'string' ? item : String(item)));
+  if (translations.length !== normalizedSegments.length) {
+    throw buildCountMismatchError({
+      expected: normalizedSegments.length,
+      actual: translations.length
+    });
+  }
+
+  if (translations.some((item) => item === undefined)) {
+    throw buildCountMismatchError({
+      expected: normalizedSegments.length,
+      actual: translations.filter((item) => item !== undefined).length
+    });
+  }
+
+  return translations;
+}
+
+async function translateBatchWithRetries({
+  batchIndices,
+  segments,
+  segmentTerms,
+  config,
+  prompt,
+  translations
+}) {
+  let pending = [...batchIndices];
+  let attempt = 0;
+  let missingEntries = [];
+
+  while (pending.length > 0 && attempt < config.retry_times) {
+    attempt += 1;
+
+    const batchSegments = pending.map((index) => ({
+      id: index,
+      text: segments[index].text
+    }));
+    const batchTerms = pending.map((index) => segmentTerms[index]);
+    const batchGlossary = unionGlossaryEntries(batchTerms);
+
+    try {
+      const batchTranslations = await translateBatch({
+        segments: batchSegments,
+        glossaryEntries: batchGlossary,
+        missingEntries,
+        config,
+        prompt
+      });
+
+      if (batchTranslations.length !== batchSegments.length) {
+        throw buildCountMismatchError({
+          expected: batchSegments.length,
+          actual: batchTranslations.length
+        });
+      }
+
+      pending.forEach((index, pos) => {
+        translations[index] = batchTranslations[pos];
+      });
+
+      const missingMap = checkGlossary(pending, segmentTerms, batchTranslations);
+      if (missingMap.size === 0) {
+        pending = [];
+        break;
+      }
+
+      missingEntries = flattenMissingEntries(missingMap);
+      pending = Array.from(missingMap.keys());
+
+      const missingList = missingEntries.map((entry) => `${entry.source} -> ${entry.target}`).join(', ');
+      console.warn(`Glossary check failed. Retrying. Missing terms: ${missingList}`);
+    } catch (error) {
+      if (attempt >= config.retry_times) {
+        throw error;
+      }
+      console.warn(`Translation attempt failed. Retrying. Error: ${error.message}`);
+    }
+  }
+
+  if (pending.length > 0) {
+    const missingList = missingEntries.map((entry) => `${entry.source} -> ${entry.target}`).join(', ');
+    throw new Error(`Glossary check failed after retries. Missing terms: ${missingList}`);
+  }
 }
 
 async function translateSegmentsWithRetries({
   segments,
   segmentTerms,
-  glossaryEntries,
   config,
   prompt
 }) {
   const translations = new Array(segments.length);
-  const indices = segments.map((_, index) => index);
+  const indices = segments
+    .map((segment, index) => ({ segment, index }))
+    .filter(({ segment }) => segment.text.trim().length > 0)
+    .map(({ index }) => index);
+  segments.forEach((segment, index) => {
+    if (segment.text.trim().length === 0) {
+      translations[index] = segment.text;
+    }
+  });
   const batches = buildBatches(indices, segments, config.max_batch_chars, config.max_batch_segments);
 
   for (const batchIndices of batches) {
-    let pending = [...batchIndices];
-    let attempt = 0;
-    let missingEntries = [];
-
-    while (pending.length > 0 && attempt < config.retry_times) {
-      attempt += 1;
-
-      const batchSegments = pending.map((index) => segments[index].text);
-      const batchTerms = pending.map((index) => segmentTerms[index]);
-      const batchGlossary = unionGlossaryEntries(batchTerms);
-
-      try {
-        const batchTranslations = await translateBatch({
-          segments: batchSegments,
-          glossaryEntries: batchGlossary,
-          missingEntries,
-          config,
-          prompt
-        });
-
-        if (batchTranslations.length !== batchSegments.length) {
-          throw new Error('Model returned incorrect number of translations');
+    try {
+      await translateBatchWithRetries({
+        batchIndices,
+        segments,
+        segmentTerms,
+        config,
+        prompt,
+        translations
+      });
+    } catch (error) {
+      if (isCountMismatchError(error) && batchIndices.length > 1) {
+        console.warn('Model returned incorrect number of translations. Retrying with single-segment batches.');
+        for (const index of batchIndices) {
+          await translateBatchWithRetries({
+            batchIndices: [index],
+            segments,
+            segmentTerms,
+            config,
+            prompt,
+            translations
+          });
         }
-
-        pending.forEach((index, pos) => {
-          translations[index] = batchTranslations[pos];
-        });
-
-        const missingMap = checkGlossary(pending, segmentTerms, batchTranslations);
-        if (missingMap.size === 0) {
-          pending = [];
-          break;
-        }
-
-        missingEntries = flattenMissingEntries(missingMap);
-        pending = Array.from(missingMap.keys());
-
-        const missingList = missingEntries.map((entry) => `${entry.source} -> ${entry.target}`).join(', ');
-        console.warn(`Glossary check failed. Retrying. Missing terms: ${missingList}`);
-      } catch (error) {
-        if (attempt >= config.retry_times) {
-          throw error;
-        }
-        console.warn(`Translation attempt failed. Retrying. Error: ${error.message}`);
+        continue;
       }
-    }
-
-    if (pending.length > 0) {
-      const missingList = missingEntries.map((entry) => `${entry.source} -> ${entry.target}`).join(', ');
-      throw new Error(`Glossary check failed after retries. Missing terms: ${missingList}`);
+      throw error;
     }
   }
 
@@ -317,7 +491,6 @@ export async function translateMarkdown(source, { config, glossary, prompt }) {
   const translations = await translateSegmentsWithRetries({
     segments,
     segmentTerms,
-    glossaryEntries,
     config,
     prompt
   });

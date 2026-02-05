@@ -6,3 +6,4 @@ Requirements:
 - Keep whitespace and punctuation appropriate for Chinese.
 - Follow the glossary strictly: when a glossary source term appears, use the target translation verbatim.
 - Return strict JSON only with the required shape.
+- Each translation must include the segment id provided in the input.
