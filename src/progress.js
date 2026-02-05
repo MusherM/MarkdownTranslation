@@ -8,7 +8,7 @@ function formatBar({ done, total, width }) {
   const ratio = total > 0 ? Math.min(done / total, 1) : 1;
   const filled = Math.round(ratio * width);
   const empty = Math.max(width - filled, 0);
-  const bar = `${ANSI.green}${'━'.repeat(filled)}${ANSI.reset}${ANSI.dim}${'━'.repeat(empty)}${ANSI.reset}`;
+  const bar = `${ANSI.green}${'='.repeat(filled)}${ANSI.reset}${ANSI.dim}${'-'.repeat(empty)}${ANSI.reset}`;
   const percent = `${Math.round(ratio * 100)}%`.padStart(4);
   const counts = total > 0 ? ` ${done}/${total}` : '';
   return `${bar} ${percent}${counts}`;

@@ -123,6 +123,10 @@ function buildUserMessage(payload) {
   return `INPUT JSON:\n${JSON.stringify(payload, null, 2)}\n\nReturn JSON only with the exact shape: {\"translations\": [{\"id\": <id>, \"text\": <translated>}, ...]}.\n- Include one item for every input segment id.\n- If you cannot translate a segment, return the original text as the value of \"text\".`;
 }
 
+function buildJudgeUserMessage(payload) {
+  return `INPUT JSON:\n${JSON.stringify(payload, null, 2)}\n\nReturn JSON only with the exact shape: {\"decisions\": [{\"id\": <id>, \"accept\": <true|false>, \"reason\": <string>}, ...]}.`;
+}
+
 function normalizeSegmentItems(segments) {
   return segments.map((segment, index) => {
     if (segment && typeof segment === 'object' && 'text' in segment) {
@@ -155,6 +159,25 @@ function parseModelResponse(content) {
     const slice = text.slice(start, end + 1);
     return JSON.parse(slice);
   }
+}
+
+function coerceBoolean(value) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', 'yes', 'y', '1'].includes(normalized)) {
+      return true;
+    }
+    if (['false', 'no', 'n', '0'].includes(normalized)) {
+      return false;
+    }
+  }
+  return false;
 }
 
 function coerceTranslationText(item) {
@@ -350,12 +373,70 @@ async function translateBatch({
   return translations;
 }
 
+async function judgeGlossaryTranslations({
+  items,
+  config,
+  judgePrompt
+}) {
+  if (!judgePrompt || items.length === 0) {
+    return new Map();
+  }
+
+  const payload = {
+    items
+  };
+
+  const messages = [
+    {
+      role: 'system',
+      content: judgePrompt.trim()
+    },
+    {
+      role: 'user',
+      content: buildJudgeUserMessage(payload)
+    }
+  ];
+
+  const content = await chatCompletion({
+    baseUrl: config.base_url,
+    apiKey: config.api_key,
+    model: config.model,
+    messages,
+    temperature: config.temperature,
+    max_tokens: config.max_tokens
+  });
+
+  const parsed = parseModelResponse(content);
+  if (!parsed || !Array.isArray(parsed.decisions)) {
+    throw new Error('Judge response missing decisions array');
+  }
+
+  const decisions = new Map();
+  for (const item of parsed.decisions) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const id = item.id ?? item.index ?? item.key;
+    const numericId = Number(id);
+    if (Number.isNaN(numericId)) {
+      continue;
+    }
+    decisions.set(numericId, {
+      accept: coerceBoolean(item.accept ?? item.approve ?? item.ok),
+      reason: typeof item.reason === 'string' ? item.reason : ''
+    });
+  }
+
+  return decisions;
+}
+
 async function translateBatchWithRetries({
   batchIndices,
   segments,
   segmentTerms,
   config,
   prompt,
+  judgePrompt,
   translations
 }) {
   let pending = [...batchIndices];
@@ -398,6 +479,43 @@ async function translateBatchWithRetries({
         break;
       }
 
+      const indexToTranslation = new Map();
+      pending.forEach((index, pos) => {
+        indexToTranslation.set(index, batchTranslations[pos]);
+      });
+
+      const judgeItems = Array.from(missingMap.entries()).map(([index, missing]) => ({
+        id: index,
+        source: segments[index].text,
+        translation: indexToTranslation.get(index) ?? '',
+        missing_terms: missing.map((entry) => ({
+          source: entry.source,
+          target: entry.target
+        }))
+      }));
+
+      try {
+        const decisions = await judgeGlossaryTranslations({
+          items: judgeItems,
+          config,
+          judgePrompt
+        });
+        if (decisions.size > 0) {
+          for (const [index, decision] of decisions.entries()) {
+            if (decision && decision.accept) {
+              missingMap.delete(index);
+            }
+          }
+        }
+      } catch (error) {
+        console.warn(`Glossary judge failed. Continuing with retries. Error: ${error.message}`);
+      }
+
+      if (missingMap.size === 0) {
+        pending = [];
+        break;
+      }
+
       missingEntries = flattenMissingEntries(missingMap);
       pending = Array.from(missingMap.keys());
 
@@ -421,7 +539,9 @@ async function translateSegmentsWithRetries({
   segments,
   segmentTerms,
   config,
-  prompt
+  prompt,
+  judgePrompt,
+  onProgress
 }) {
   const translations = new Array(segments.length);
   const indices = segments
@@ -433,6 +553,15 @@ async function translateSegmentsWithRetries({
       translations[index] = segment.text;
     }
   });
+  const totalSegments = indices.length;
+  let doneSegments = 0;
+  if (onProgress) {
+    if (totalSegments === 0) {
+      onProgress({ done: 1, total: 1 });
+    } else {
+      onProgress({ done: 0, total: totalSegments });
+    }
+  }
   const batches = buildBatches(indices, segments, config.max_batch_chars, config.max_batch_segments);
 
   for (const batchIndices of batches) {
@@ -443,8 +572,13 @@ async function translateSegmentsWithRetries({
         segmentTerms,
         config,
         prompt,
+        judgePrompt,
         translations
       });
+      doneSegments += batchIndices.length;
+      if (onProgress) {
+        onProgress({ done: doneSegments, total: totalSegments });
+      }
     } catch (error) {
       if (isCountMismatchError(error) && batchIndices.length > 1) {
         console.warn('Model returned incorrect number of translations. Retrying with single-segment batches.');
@@ -455,8 +589,13 @@ async function translateSegmentsWithRetries({
             segmentTerms,
             config,
             prompt,
+            judgePrompt,
             translations
           });
+          doneSegments += 1;
+          if (onProgress) {
+            onProgress({ done: doneSegments, total: totalSegments });
+          }
         }
         continue;
       }
@@ -467,7 +606,7 @@ async function translateSegmentsWithRetries({
   return translations;
 }
 
-export async function translateMarkdown(source, { config, glossary, prompt }) {
+export async function translateMarkdown(source, { config, glossary, prompt, judgePrompt, onProgress }) {
   const processor = unified()
     .use(remarkParse)
     .use(remarkGfm)
@@ -482,6 +621,9 @@ export async function translateMarkdown(source, { config, glossary, prompt }) {
   const segments = collectSegments(tree);
 
   if (segments.length === 0) {
+    if (onProgress) {
+      onProgress({ done: 1, total: 1 });
+    }
     return source;
   }
 
@@ -492,7 +634,9 @@ export async function translateMarkdown(source, { config, glossary, prompt }) {
     segments,
     segmentTerms,
     config,
-    prompt
+    prompt,
+    judgePrompt,
+    onProgress
   });
 
   segments.forEach((segment, index) => {
