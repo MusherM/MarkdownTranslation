@@ -58,7 +58,7 @@ export async function loadConfig(configPath) {
   if (envConfig.base_url) {
     merged.base_url = envConfig.base_url;
   }
-  if (envConfig.api_key) {
+  if (!merged.api_key && envConfig.api_key) {
     merged.api_key = envConfig.api_key;
   }
 
