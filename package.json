@@ -1,0 +1,21 @@
+{
+  "name": "markdown-translate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "md-translate": "src/cli.js"
+  },
+  "scripts": {
+    "translate": "node src/cli.js"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.2.0",
+    "remark-frontmatter": "^5.0.0",
+    "remark-gfm": "^4.0.0",
+    "remark-parse": "^11.0.0",
+    "remark-stringify": "^11.0.0",
+    "unified": "^11.0.0",
+    "unist-util-visit": "^5.0.0"
+  }
+}

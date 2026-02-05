@@ -1,0 +1,13 @@
+{
+  "Agent": "代理",
+  "Subagent": "子代理",
+  "Agent Loop": "代理循环",
+  "Context Window": "上下文窗口",
+  "Tool": "工具",
+  "Extension": "扩展",
+  "Plugin": "插件",
+  "Skill": "技能",
+  "Hook": "钩子",
+  "Prompt": "提示",
+  "Completion": "补全"
+}
