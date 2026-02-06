@@ -1,0 +1,21 @@
+{
+  // OpenAI-compatible API settings
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "",
+  "model": "gpt-4o-mini",
+
+  // Retry attempts (API failures + glossary rule failures)
+  "retry_times": 3,
+
+  // Prompt file (optional)
+  "prompt_path": "prompts/translate.md",
+
+  // Glossary (inline or via file)
+  "glossary_path": "glossary.jsonc",
+
+  // Optional tuning
+  "temperature": 0.2,
+  "max_tokens": 2048,
+  "max_batch_chars": 4000,
+  "max_batch_segments": 100
+}
