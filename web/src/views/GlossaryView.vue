@@ -311,7 +311,7 @@ function clearAll() {
       <input
         ref="fileInputRef"
         type="file"
-        accept=".json"
+        accept=".json,.jsonc"
         class="hidden"
         @change="handleFileSelect"
       />

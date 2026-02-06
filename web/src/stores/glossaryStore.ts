@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
+import { parse } from 'jsonc-parser'
 
 /**
  * 词汇表类型
@@ -132,7 +133,7 @@ export const useGlossaryStore = defineStore('glossary', () => {
   async function importFromFile(file: File, options: GlossaryImportOptions): Promise<void> {
     try {
       const text = await file.text()
-      const data = JSON.parse(text)
+      const data = parse(text)
 
       // 验证数据格式
       if (typeof data !== 'object' || data === null || Array.isArray(data)) {
