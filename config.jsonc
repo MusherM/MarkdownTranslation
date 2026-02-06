@@ -1,8 +1,8 @@
 {
   // OpenAI-compatible API settings
-  "base_url": "https://api.openai.com/v1",
+  "base_url": "https://api.siliconflow.cn",
   "api_key": "",
-  "model": "gpt-4o-mini",
+  "model": "Qwen/Qwen3-8B",
 
   // Retry attempts (API failures + glossary rule failures)
   "retry_times": 3,
@@ -15,7 +15,7 @@
 
   // Optional tuning
   "temperature": 0.2,
-  "max_tokens": 2048,
+  "max_tokens": 8192,
   "max_batch_chars": 4000,
   "max_batch_segments": 100
 }
