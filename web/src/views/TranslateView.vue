@@ -383,7 +383,7 @@ function formatFileSize(bytes: number): string {
                 <div class="flex flex-col">
                   <label class="text-sm font-medium text-muted-foreground mb-2">原文</label>
                   <ScrollArea class="flex-1 border rounded-lg bg-muted/30">
-                    <pre class="p-4 text-sm whitespace-pre-wrap font-mono text-muted-foreground">{{ selectedFile.content }}</pre>
+                    <pre class="p-4 text-sm whitespace-pre-wrap font-mono text-muted-foreground overflow-x-auto max-w-full">{{ selectedFile.content }}</pre>
                   </ScrollArea>
                 </div>
                 
@@ -391,7 +391,7 @@ function formatFileSize(bytes: number): string {
                 <div class="flex flex-col">
                   <label class="text-sm font-medium text-muted-foreground mb-2">译文</label>
                   <ScrollArea class="flex-1 border rounded-lg bg-primary/5">
-                    <pre v-if="selectedFile.translatedContent" class="p-4 text-sm whitespace-pre-wrap font-mono">{{ selectedFile.translatedContent }}</pre>
+                    <pre v-if="selectedFile.translatedContent" class="p-4 text-sm whitespace-pre-wrap font-mono overflow-x-auto max-w-full">{{ selectedFile.translatedContent }}</pre>
                     <div v-else class="h-full flex items-center justify-center text-muted-foreground">
                       <p v-if="selectedFile.status === 'translating'">翻译中...</p>
                       <p v-else-if="selectedFile.status === 'error'" class="text-destructive">
