@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { Upload, X, File } from 'lucide-vue-next'
-import { Button } from '@/components/ui/button'
+import { ref } from 'vue'
+import { Upload } from 'lucide-vue-next'
 import { cn } from '@/lib/utils'
 
 interface Props {
@@ -19,17 +18,15 @@ const emits = defineEmits<{
   select: [files: File[]]
 }>()
 
-const selectedFiles = ref<File[]>([])
 const isDragging = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
-
-const fileCount = computed(() => selectedFiles.value.length)
 
 function handleFileSelect(event: Event) {
   const input = event.target as HTMLInputElement
   if (input.files && input.files.length > 0) {
-    const files = Array.from(input.files)
-    addFiles(files)
+    emits('select', Array.from(input.files))
+    // Reset input so selecting the same file again can still trigger change.
+    input.value = ''
   }
 }
 
@@ -38,8 +35,7 @@ function handleDrop(event: DragEvent) {
   isDragging.value = false
   
   if (event.dataTransfer?.files) {
-    const files = Array.from(event.dataTransfer.files)
-    addFiles(files)
+    emits('select', Array.from(event.dataTransfer.files))
   }
 }
 
@@ -53,35 +49,8 @@ function handleDragLeave(event: DragEvent) {
   isDragging.value = false
 }
 
-function addFiles(files: File[]) {
-  if (props.multiple) {
-    selectedFiles.value.push(...files)
-  } else {
-    selectedFiles.value = files.slice(0, 1)
-  }
-  emits('select', selectedFiles.value)
-}
-
-function removeFile(index: number) {
-  selectedFiles.value.splice(index, 1)
-  emits('select', selectedFiles.value)
-}
-
-function clearFiles() {
-  selectedFiles.value = []
-  emits('select', [])
-}
-
 function triggerFileInput() {
   fileInputRef.value?.click()
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 </script>
 
@@ -92,8 +61,7 @@ function formatFileSize(bytes: number): string {
       :class="cn(
         'relative border-2 border-dashed rounded-lg p-8 transition-all duration-200 cursor-pointer',
         'hover:border-primary/50 hover:bg-primary/5',
-        isDragging ? 'border-primary bg-primary/10' : 'border-muted-foreground/25',
-        selectedFiles.length > 0 ? 'bg-muted/30' : ''
+        isDragging ? 'border-primary bg-primary/10' : 'border-muted-foreground/25'
       )"
       @click="triggerFileInput"
       @drop="handleDrop"
@@ -132,43 +100,6 @@ function formatFileSize(bytes: number): string {
           <p class="text-xs text-muted-foreground">
             支持 {{ accept }} 格式{{ multiple ? '，可多选' : '' }}
           </p>
-        </div>
-      </div>
-    </div>
-
-    <!-- 已选文件列表 -->
-    <div v-if="selectedFiles.length > 0" class="mt-4 space-y-2">
-      <div class="flex items-center justify-between">
-        <span class="text-sm font-medium text-muted-foreground">
-          已选择 {{ fileCount }} 个文件
-        </span>
-        <Button variant="ghost" size="sm" @click="clearFiles">
-          清空全部
-        </Button>
-      </div>
-      
-      <div class="space-y-2 max-h-48 overflow-y-auto">
-        <div
-          v-for="(file, index) in selectedFiles"
-          :key="`${file.name}-${index}`"
-          class="flex items-center justify-between p-3 rounded-md bg-muted/50 border border-border/50 group hover:bg-muted transition-colors"
-        >
-          <div class="flex items-center gap-3 min-w-0">
-            <File class="w-4 h-4 text-muted-foreground flex-shrink-0" />
-            <div class="min-w-0">
-              <p class="text-sm font-medium truncate">{{ file.name }}</p>
-              <p class="text-xs text-muted-foreground">{{ formatFileSize(file.size) }}</p>
-            </div>
-          </div>
-          
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-            @click.stop="removeFile(index)"
-          >
-            <X class="w-4 h-4" />
-          </Button>
         </div>
       </div>
     </div>

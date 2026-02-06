@@ -12,7 +12,10 @@ const router = createRouter({
     {
       path: '/translate',
       name: 'translate',
-      component: () => import('../views/TranslateView.vue')
+      component: () => import('../views/TranslateView.vue'),
+      meta: {
+        keepAlive: true,
+      },
     },
     {
       path: '/glossary',

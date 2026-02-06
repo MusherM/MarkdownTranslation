@@ -3,9 +3,10 @@
   "started_at": "2026-02-06T06:32:36.999Z",
   "session_ids": [
     "ses_3ce5fd2d8ffelhj86m6mqp77y2",
-    "ses_3ce586516ffel9qTYRBy0o5eRa"
+    "ses_3ce586516ffel9qTYRBy0o5eRa",
+    "ses_3ce5387eaffeHNaxsCfvxaPOCf"
   ],
   "plan_name": "fix-preview-scroll",
   "completed": true,
-  "completed_at": "2026-02-06T06:35:00.000Z"
+  "completed_at": "2026-02-06T06:55:00.000Z"
 }

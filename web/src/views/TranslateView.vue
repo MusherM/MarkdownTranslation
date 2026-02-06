@@ -42,6 +42,33 @@ const files = ref<FileItem[]>([])
 const selectedFileId = ref<string | null>(null)
 const isTranslating = ref(false)
 
+const TRANSLATION_PROMPT = `You are a professional translator specializing in technical documentation.
+Translate the following English Markdown content to Simplified Chinese.
+
+Requirements:
+1. Preserve all Markdown formatting (headers, lists, code blocks, links, etc.)
+2. Maintain the original document structure
+3. Use professional and accurate technical terminology
+4. Ensure natural and fluent Chinese expression
+5. Do not translate content inside code blocks or inline code
+6. Keep all URLs, file paths, and code identifiers unchanged`
+
+const GLOSSARY_JUDGE_PROMPT = `你是术语表合规判定器，负责判断翻译是否可以在未使用术语表的情况下被接受。
+
+每个 item 包含：
+- source: 英文原文片段
+- translation: 当前中文翻译
+- missing_terms: 未命中的术语表对照（source -> target）
+
+任务：
+- 判断该翻译是否仍然合适。
+- 只有在翻译准确且使用术语表会显得不自然、别扭或不正确时才 accept。
+- 如果翻译不准确，或应该使用术语表目标词，或不确定，请 reject。
+- 保守判断：宁可 reject 以便重试。
+
+只返回严格 JSON，格式必须为：
+{"decisions": [{"id": <id>, "accept": <true|false>, "reason": <string>}, ...]}`
+
 // 计算属性
 const hasFiles = computed(() => files.value.length > 0)
 const canTranslate = computed(() => {
@@ -70,7 +97,16 @@ async function readFile(file: File): Promise<string> {
 
 // 处理文件选择
 async function handleFileSelect(selectedFiles: File[]) {
+  const existingSignatures = new Set(
+    files.value.map((item) => `${item.file.name}::${item.file.size}::${item.file.lastModified}`)
+  )
+
   for (const file of selectedFiles) {
+    const signature = `${file.name}::${file.size}::${file.lastModified}`
+    if (existingSignatures.has(signature)) {
+      continue
+    }
+
     try {
       const content = await readFile(file)
       const fileItem: FileItem = {
@@ -83,6 +119,7 @@ async function handleFileSelect(selectedFiles: File[]) {
         progress: 0
       }
       files.value.push(fileItem)
+      existingSignatures.add(signature)
     } catch (error) {
       console.error('读取文件失败:', error)
     }
@@ -135,16 +172,8 @@ async function translateFile(fileItem: FileItem) {
         max_batch_segments: 100
       },
       glossary: glossaryStore.glossary,
-      prompt: `You are a professional translator specializing in technical documentation. 
-Translate the following English Markdown content to Simplified Chinese.
-
-Requirements:
-1. Preserve all Markdown formatting (headers, lists, code blocks, links, etc.)
-2. Maintain the original document structure
-3. Use professional and accurate technical terminology
-4. Ensure natural and fluent Chinese expression
-5. Do not translate content inside code blocks or inline code
-6. Keep all URLs, file paths, and code identifiers unchanged`,
+      prompt: TRANSLATION_PROMPT,
+      judgePrompt: GLOSSARY_JUDGE_PROMPT,
       chatCompletion,
       onProgress: ({ done, total }) => {
         fileItem.progress = Math.round((done / total) * 100)
