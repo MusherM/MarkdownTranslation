@@ -1,8 +1,11 @@
 {
-  "active_plan": "/Users/lixinyang/project/markdown-translate/.sisyphus/plans/web-frontend.md",
-  "started_at": "2026-02-06T03:42:57.485Z",
+  "active_plan": "/Users/lixinyang/project/markdown-translate/.sisyphus/plans/fix-preview-scroll.md",
+  "started_at": "2026-02-06T06:32:36.999Z",
   "session_ids": [
-    "ses_3cf01d62affeEbTof6AlXzih58"
+    "ses_3ce5fd2d8ffelhj86m6mqp77y2",
+    "ses_3ce586516ffel9qTYRBy0o5eRa"
   ],
-  "plan_name": "web-frontend"
+  "plan_name": "fix-preview-scroll",
+  "completed": true,
+  "completed_at": "2026-02-06T06:35:00.000Z"
 }

@@ -350,7 +350,7 @@ function formatFileSize(bytes: number): string {
       </div>
 
       <!-- 右侧：预览区域 -->
-      <div class="lg:col-span-2 space-y-6">
+      <div class="lg:col-span-2 space-y-6 min-h-0">
         <!-- 未选择文件提示 -->
         <Card v-if="!selectedFile" class="h-[600px] flex items-center justify-center">
           <div class="text-center text-muted-foreground">
@@ -369,7 +369,7 @@ function formatFileSize(bytes: number): string {
           />
 
           <!-- 预览区域 -->
-          <Card class="flex-1">
+          <Card class="flex-1 overflow-hidden">
             <CardHeader class="flex flex-row items-center justify-between pb-2">
               <CardTitle class="text-lg">翻译预览</CardTitle>
               <div class="flex items-center gap-2">
@@ -377,21 +377,21 @@ function formatFileSize(bytes: number): string {
                 <Badge variant="default">译文</Badge>
               </div>
             </CardHeader>
-            <CardContent>
-              <div class="grid grid-cols-2 gap-4 h-[500px]">
+            <CardContent class="h-[500px] overflow-hidden">
+              <div class="grid grid-cols-2 gap-4 h-full min-h-0">
                 <!-- 原文 -->
-                <div class="flex flex-col">
+                <div class="flex flex-col min-h-0">
                   <label class="text-sm font-medium text-muted-foreground mb-2">原文</label>
-                  <ScrollArea class="flex-1 border rounded-lg bg-muted/30">
-                    <pre class="p-4 text-sm whitespace-pre-wrap font-mono text-muted-foreground h-full overflow-y-auto overflow-x-auto max-w-full">{{ selectedFile.content }}</pre>
+                  <ScrollArea class="flex-1 min-h-0 border rounded-lg bg-muted/30 overflow-hidden">
+                    <pre class="p-4 text-sm whitespace-pre-wrap break-words font-mono text-muted-foreground">{{ selectedFile.content }}</pre>
                   </ScrollArea>
                 </div>
                 
                 <!-- 译文 -->
-                <div class="flex flex-col">
+                <div class="flex flex-col min-h-0">
                   <label class="text-sm font-medium text-muted-foreground mb-2">译文</label>
-                  <ScrollArea class="flex-1 border rounded-lg bg-primary/5">
-                    <pre v-if="selectedFile.translatedContent" class="p-4 text-sm whitespace-pre-wrap font-mono h-full overflow-y-auto overflow-x-auto max-w-full">{{ selectedFile.translatedContent }}</pre>
+                  <ScrollArea class="flex-1 min-h-0 border rounded-lg bg-primary/5 overflow-hidden">
+                    <pre v-if="selectedFile.translatedContent" class="p-4 text-sm whitespace-pre-wrap break-words font-mono">{{ selectedFile.translatedContent }}</pre>
                     <div v-else class="h-full flex items-center justify-center text-muted-foreground">
                       <p v-if="selectedFile.status === 'translating'">翻译中...</p>
                       <p v-else-if="selectedFile.status === 'error'" class="text-destructive">
