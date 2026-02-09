@@ -13,7 +13,8 @@ const configStore = useConfigStore()
 const form = ref({
   baseUrl: configStore.config.baseUrl,
   apiKey: configStore.config.apiKey,
-  modelName: configStore.config.modelName
+  modelName: configStore.config.modelName,
+  translateMarkdownCodeBlocks: configStore.config.translateMarkdownCodeBlocks
 })
 
 // 错误状态
@@ -75,7 +76,12 @@ function saveConfig() {
     configStore.config.baseUrl = form.value.baseUrl.trim()
     configStore.config.apiKey = form.value.apiKey.trim()
     configStore.config.modelName = form.value.modelName.trim()
+    configStore.config.translateMarkdownCodeBlocks = form.value.translateMarkdownCodeBlocks
   }
+}
+
+function saveTranslateMarkdownCodeBlocks() {
+  configStore.config.translateMarkdownCodeBlocks = form.value.translateMarkdownCodeBlocks
 }
 
 // 测试连接
@@ -121,7 +127,8 @@ function resetToDefaults() {
   form.value = {
     baseUrl: configStore.config.baseUrl,
     apiKey: configStore.config.apiKey,
-    modelName: configStore.config.modelName
+    modelName: configStore.config.modelName,
+    translateMarkdownCodeBlocks: configStore.config.translateMarkdownCodeBlocks
   }
   errors.value = { baseUrl: '', apiKey: '', modelName: '' }
   testResult.value = null
@@ -203,6 +210,27 @@ function resetToDefaults() {
             <p class="text-xs text-muted-foreground">
               要使用的模型名称，例如：gpt-4o-mini、gpt-4o、claude-3-sonnet 等
             </p>
+          </div>
+
+          <!-- 翻译选项 -->
+          <div class="space-y-2">
+            <div class="rounded-lg border p-4">
+              <div class="flex items-start justify-between gap-4">
+                <div class="space-y-1">
+                  <Label for="translateMarkdownCodeBlocks">是否翻译 markdown 片段</Label>
+                  <p class="text-xs text-muted-foreground">
+                    开启后会翻译 <code>```md</code>/<code>```markdown</code>，以及未标注语言但可识别为 Markdown 的代码块内容（按嵌套 Markdown 文档处理）
+                  </p>
+                </div>
+                <input
+                  id="translateMarkdownCodeBlocks"
+                  v-model="form.translateMarkdownCodeBlocks"
+                  type="checkbox"
+                  class="h-4 w-4 mt-1 accent-primary"
+                  @change="saveTranslateMarkdownCodeBlocks"
+                />
+              </div>
+            </div>
           </div>
 
           <!-- 测试连接按钮 -->

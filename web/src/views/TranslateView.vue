@@ -175,6 +175,7 @@ async function translateFile(fileItem: FileItem) {
       glossary: glossaryStore.glossary,
       prompt: TRANSLATION_PROMPT,
       judgePrompt: GLOSSARY_JUDGE_PROMPT,
+      translateMarkdownCodeBlocks: configStore.config.translateMarkdownCodeBlocks,
       chatCompletion,
       onProgress: ({ done, total }) => {
         fileItem.progress = Math.round((done / total) * 100)

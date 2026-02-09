@@ -8,6 +8,7 @@ export interface Config {
   baseUrl: string
   apiKey: string
   modelName: string
+  translateMarkdownCodeBlocks: boolean
 }
 
 /**
@@ -21,7 +22,8 @@ const STORAGE_KEY = 'md-translate-config'
 const DEFAULT_CONFIG: Config = {
   baseUrl: 'https://api.openai.com/v1',
   apiKey: '',
-  modelName: 'gpt-4o-mini'
+  modelName: 'gpt-4o-mini',
+  translateMarkdownCodeBlocks: false
 }
 
 /**

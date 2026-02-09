@@ -3,7 +3,7 @@ import remarkParse from 'remark-parse';
 import remarkStringify from 'remark-stringify';
 import remarkGfm from 'remark-gfm';
 import remarkFrontmatter from 'remark-frontmatter';
-import { visit, SKIP } from 'unist-util-visit';
+import { visit, SKIP, EXIT } from 'unist-util-visit';
 import type { Node } from 'unist';
 
 const SKIP_TYPES = new Set<string>([
@@ -62,6 +62,7 @@ export type TranslateMarkdownOptions = {
   glossary: Glossary;
   prompt: string;
   judgePrompt?: string;
+  translateMarkdownCodeBlocks?: boolean;
   onProgress?: (update: ProgressUpdate) => void;
   chatCompletion: ChatCompletionFunction;
   logger?: TranslatorLogger;
@@ -148,6 +149,126 @@ function collectSegments(tree: Node): Segment[] {
     return undefined;
   });
   return segments;
+}
+
+function isMarkdownFenceLanguage(lang?: string | null): boolean {
+  const normalized = (lang ?? '').trim().toLowerCase();
+  return normalized === 'md' || normalized === 'markdown';
+}
+
+const markdownProbeProcessor = unified()
+  .use(remarkParse)
+  .use(remarkGfm)
+  .use(remarkFrontmatter, ['yaml', 'toml']);
+
+const MARKDOWN_BLOCK_TYPES = new Set<string>([
+  'heading',
+  'list',
+  'blockquote',
+  'thematicBreak',
+  'table',
+  'code',
+  'html',
+  'yaml',
+  'toml',
+  'definition',
+  'footnoteDefinition'
+]);
+
+const MARKDOWN_INLINE_TYPES = new Set<string>([
+  'link',
+  'image',
+  'strong',
+  'emphasis',
+  'delete',
+  'inlineCode',
+  'footnoteReference',
+  'linkReference',
+  'imageReference',
+  'break'
+]);
+
+function isLikelyMarkdownCodeContent(value: string): boolean {
+  const normalized = value.replace(/\r\n/g, '\n').trim();
+  if (!normalized) {
+    return false;
+  }
+
+  let parsed: Node;
+  try {
+    parsed = markdownProbeProcessor.parse(normalized);
+  } catch {
+    return false;
+  }
+
+  const root = parsed as { children?: Array<{ type?: string }> };
+  if (!Array.isArray(root.children) || root.children.length === 0) {
+    return false;
+  }
+
+  let hasMarkdownSyntax = false;
+  visit(parsed, (node, _index, parent) => {
+    const typedNode = node as { type?: string };
+    const parentNode = parent as { type?: string } | undefined;
+    const type = typedNode.type ?? '';
+
+    if (MARKDOWN_BLOCK_TYPES.has(type)) {
+      hasMarkdownSyntax = true;
+      return EXIT;
+    }
+    if (parentNode?.type === 'paragraph' && MARKDOWN_INLINE_TYPES.has(type)) {
+      hasMarkdownSyntax = true;
+      return EXIT;
+    }
+    return undefined;
+  });
+
+  return hasMarkdownSyntax;
+}
+
+function shouldTranslateMarkdownCodeBlock(lang: string | null | undefined, value: string): boolean {
+  if (isMarkdownFenceLanguage(lang)) {
+    return true;
+  }
+
+  // If language is explicitly specified and not markdown, trust it.
+  if ((lang ?? '').trim().length > 0) {
+    return false;
+  }
+
+  return isLikelyMarkdownCodeContent(value);
+}
+
+function collectMarkdownCodeBlockSegments(tree: Node): Segment[] {
+  const segments: Segment[] = [];
+  visit(tree, (node) => {
+    const typedNode = node as { type: string; lang?: string | null; value?: string };
+    if (typedNode.type !== 'code') {
+      return undefined;
+    }
+
+    const blockValue = typedNode.value ?? '';
+    if (!shouldTranslateMarkdownCodeBlock(typedNode.lang, blockValue)) {
+      return undefined;
+    }
+
+    segments.push({
+      text: blockValue,
+      set(value) {
+        typedNode.value = value;
+      }
+    });
+    return undefined;
+  });
+  return segments;
+}
+
+function normalizeTrailingNewline(original: string, translated: string): string {
+  const originalHasTrailingNewline = /\r?\n$/.test(original);
+  if (originalHasTrailingNewline) {
+    return translated;
+  }
+  return translated.replace(/\r?\n$/, '');
 }
 
 function buildBatches(
@@ -902,7 +1023,11 @@ async function translateSegmentsWithRetries(params: {
   return translations;
 }
 
-export async function translateMarkdown(source: string, options: TranslateMarkdownOptions): Promise<string> {
+async function translateMarkdownInternal(
+  source: string,
+  options: TranslateMarkdownOptions,
+  reportProgress: boolean
+): Promise<string> {
   const processor = unified()
     .use(remarkParse)
     .use(remarkGfm)
@@ -915,33 +1040,54 @@ export async function translateMarkdown(source: string, options: TranslateMarkdo
 
   const tree = processor.parse(source);
   const segments = collectSegments(tree);
+  const markdownCodeSegments = options.translateMarkdownCodeBlocks
+    ? collectMarkdownCodeBlockSegments(tree)
+    : [];
 
-  if (segments.length === 0) {
-    if (options.onProgress) {
+  if (segments.length === 0 && markdownCodeSegments.length === 0) {
+    if (reportProgress && options.onProgress) {
       options.onProgress({ done: 1, total: 1 });
     }
     return source;
   }
 
-  const glossaryEntries = buildGlossaryEntries(options.glossary);
-  const segmentTerms = segments.map((segment) => termsInText(segment.text, glossaryEntries));
+  if (segments.length > 0) {
+    const glossaryEntries = buildGlossaryEntries(options.glossary);
+    const segmentTerms = segments.map((segment) => termsInText(segment.text, glossaryEntries));
 
-  const translations = await translateSegmentsWithRetries({
-    segments,
-    segmentTerms,
-    config: options.config,
-    prompt: options.prompt,
-    judgePrompt: options.judgePrompt,
-    onProgress: options.onProgress,
-    logger: options.logger,
-    chatCompletion: options.chatCompletion
-  });
+    const translations = await translateSegmentsWithRetries({
+      segments,
+      segmentTerms,
+      config: options.config,
+      prompt: options.prompt,
+      judgePrompt: options.judgePrompt,
+      onProgress: reportProgress ? options.onProgress : undefined,
+      logger: options.logger,
+      chatCompletion: options.chatCompletion
+    });
 
-  segments.forEach((segment, index) => {
-    segment.set(translations[index]);
-  });
+    segments.forEach((segment, index) => {
+      segment.set(translations[index]);
+    });
+  } else if (reportProgress && options.onProgress && markdownCodeSegments.length > 0) {
+    options.onProgress({ done: 0, total: 1 });
+  }
+
+  if (markdownCodeSegments.length > 0) {
+    for (const segment of markdownCodeSegments) {
+      const translated = await translateMarkdownInternal(segment.text, options, false);
+      segment.set(normalizeTrailingNewline(segment.text, translated));
+    }
+    if (reportProgress && options.onProgress && segments.length === 0) {
+      options.onProgress({ done: 1, total: 1 });
+    }
+  }
 
   const output = processor.stringify(tree);
 
   return output;
+}
+
+export async function translateMarkdown(source: string, options: TranslateMarkdownOptions): Promise<string> {
+  return translateMarkdownInternal(source, options, true);
 }
