@@ -45,6 +45,7 @@ Create `config.jsonc` (or `config.json`). Example:
   "glossary_path": "glossary.example.jsonc",
   "temperature": 0.2,
   "max_tokens": 2048,
+  "timeout_ms": 120000,
   "max_batch_chars": 4000,
   "max_batch_segments": 100,
   "log_path": "log.txt"
@@ -63,13 +64,13 @@ Glossary can be inline or via `glossary_path`:
 ```
 
 ## Glossary Rules
-If a source term appears in any translated segment, the output must contain the corresponding target term. When the rule check fails, the tool re-prompts the model with the missing terms. The retry budget is controlled by `retry_times`. If the glossary check keeps failing, the tool asks a glossary-judge prompt whether the translation is still acceptable; if accepted, the translation is kept without further retries. If retries are exhausted, the last translation result is used as a fallback.
+If a source term appears in any translated segment, the output must contain the corresponding target term. When the rule check fails, the tool re-prompts the model with the missing terms. The retry budget is controlled by `retry_times`. If the glossary check keeps failing, the tool asks a glossary-judge prompt whether the translation is still acceptable; if accepted, the translation is kept without further retries. If retries are exhausted after at least one successful batch, the last available translation is retained; if a segment never receives a successful translation response, the run fails instead of silently keeping English source text.
 
 ## Notes
 - Markdown formatting may be normalized by the serializer, but the document structure is preserved.
 - Code blocks, inline code, and HTML are not translated.
 - A thin green progress bar is shown per document during translation (TTY only).
-- If a translated output file already exists (e.g., `foo.zh.md`), the file is skipped.
+- If a translated output file already exists (e.g., `foo.zh.md`), the file is skipped by default. Use `--force` to overwrite.
 - Failures are logged to `log.txt` by default (including model inputs/outputs for debugging). You can change the path with `log_path`.
 
 ## Prompt
