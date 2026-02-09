@@ -193,7 +193,13 @@ function buildUserPayload(params: {
   segments: NormalizedSegmentItem[];
   missing_terms?: Array<{ source: string; target: string }>;
 } {
-  const payload = {
+  const payload: {
+    source_language: string;
+    target_language: string;
+    glossary: Array<{ source: string; target: string }>;
+    segments: NormalizedSegmentItem[];
+    missing_terms?: Array<{ source: string; target: string }>;
+  } = {
     source_language: 'English',
     target_language: 'Simplified Chinese',
     glossary: params.glossaryEntries.map((entry) => ({
@@ -204,13 +210,10 @@ function buildUserPayload(params: {
   };
 
   if (params.missingEntries && params.missingEntries.length > 0) {
-    return {
-      ...payload,
-      missing_terms: params.missingEntries.map((entry) => ({
-        source: entry.source,
-        target: entry.target
-      }))
-    };
+    payload.missing_terms = params.missingEntries.map((entry) => ({
+      source: entry.source,
+      target: entry.target
+    }));
   }
 
   return payload;
@@ -404,79 +407,6 @@ function isBatchFailedError(error: unknown): boolean {
   }
   const typedError = error as { code?: string };
   return typedError.code === 'TRANSLATION_BATCH_FAILED';
-}
-
-function containsCjk(text: string): boolean {
-  return /[\u3400-\u9fff]/.test(text);
-}
-
-function englishWordCount(text: string): number {
-  const matches = text.match(/[A-Za-z]+(?:'[A-Za-z]+)?/g);
-  return matches ? matches.length : 0;
-}
-
-function normalizeComparableText(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function isLikelyNaturalEnglishSegment(text: string): boolean {
-  const trimmed = String(text ?? '').trim();
-  if (trimmed.length < 30) {
-    return false;
-  }
-  if (containsCjk(trimmed)) {
-    return false;
-  }
-  if (/https?:\/\//i.test(trimmed)) {
-    return false;
-  }
-  const alphaCount = (trimmed.match(/[A-Za-z]/g) || []).length;
-  if (alphaCount / trimmed.length < 0.45) {
-    return false;
-  }
-  return englishWordCount(trimmed) >= 6;
-}
-
-function isLikelyUntranslatedSegment(source: string, translation: string): boolean {
-  if (!isLikelyNaturalEnglishSegment(source)) {
-    return false;
-  }
-  const translated = String(translation ?? '').trim();
-  if (!translated) {
-    return true;
-  }
-  if (containsCjk(translated)) {
-    return false;
-  }
-
-  const sourceNormalized = normalizeComparableText(source);
-  const translatedNormalized = normalizeComparableText(translated);
-  if (!translatedNormalized) {
-    return true;
-  }
-  if (sourceNormalized === translatedNormalized) {
-    return true;
-  }
-
-  const sourceWords = sourceNormalized.split(' ').filter(Boolean);
-  const translatedWords = translatedNormalized.split(' ').filter(Boolean);
-  if (sourceWords.length < 6 || translatedWords.length < 4) {
-    return false;
-  }
-
-  const sourceSet = new Set(sourceWords);
-  let overlap = 0;
-  for (const word of translatedWords) {
-    if (sourceSet.has(word)) {
-      overlap += 1;
-    }
-  }
-  const overlapRatio = overlap / Math.max(sourceWords.length, translatedWords.length);
-  return overlapRatio >= 0.85;
 }
 
 function unionGlossaryEntries(segmentsTerms: GlossaryEntry[][]): GlossaryEntry[] {
@@ -786,21 +716,6 @@ async function translateBatchWithRetries(params: {
       });
 
       const missingMap = checkGlossary(pending, params.segmentTerms, batchTranslations);
-      const untranslatedIndices = pending.filter((index, pos) =>
-        isLikelyUntranslatedSegment(params.segments[index].text, batchTranslations[pos])
-      );
-
-      if (untranslatedIndices.length > 0) {
-        const sampleIds = untranslatedIndices.slice(0, 5).join(', ');
-        const overflow = untranslatedIndices.length > 5 ? ` ... +${untranslatedIndices.length - 5}` : '';
-        console.warn(`Detected untranslated English segments. Retrying. Segment ids: ${sampleIds}${overflow}`);
-        if (params.logger?.warn) {
-          await params.logger.warn('untranslated_segments_detected', {
-            count: untranslatedIndices.length,
-            segment_ids: untranslatedIndices
-          });
-        }
-      }
 
       if (missingMap.size > 0) {
         const indexToTranslation = new Map<number, string>();
@@ -844,7 +759,7 @@ async function translateBatchWithRetries(params: {
         }
       }
 
-      const unresolved = new Set<number>([...missingMap.keys(), ...untranslatedIndices]);
+      const unresolved = new Set<number>([...missingMap.keys()]);
       if (unresolved.size === 0) {
         pending = [];
         break;
@@ -856,8 +771,6 @@ async function translateBatchWithRetries(params: {
       if (missingEntries.length > 0) {
         const missingList = missingEntries.map((entry) => `${entry.source} -> ${entry.target}`).join(', ');
         console.warn(`Glossary check failed. Retrying. Missing terms: ${missingList}`);
-      } else {
-        console.warn('Retrying unresolved untranslated segments.');
       }
     } catch (error) {
       if (attempt >= params.config.retry_times) {
@@ -899,24 +812,6 @@ async function translateBatchWithRetries(params: {
   }
 
   if (pending.length > 0) {
-    const untranslatedAfterRetries = pending.filter((index) =>
-      isLikelyUntranslatedSegment(params.segments[index].text, params.translations[index])
-    );
-    if (untranslatedAfterRetries.length > 0) {
-      const unresolvedError = buildBatchFailedError({
-        attempts: params.config.retry_times,
-        pendingCount: untranslatedAfterRetries.length,
-        cause: new Error('Some segments remained in English after all retries')
-      });
-      if (params.logger?.error) {
-        await params.logger.error('untranslated_segments_after_retries', {
-          error: unresolvedError.message,
-          segment_ids: untranslatedAfterRetries
-        });
-      }
-      throw unresolvedError;
-    }
-
     const missingList = missingEntries.map((entry) => `${entry.source} -> ${entry.target}`).join(', ');
     console.warn(`Glossary check failed after retries. Using last available translations. Missing terms: ${missingList}`);
     if (params.logger?.warn) {

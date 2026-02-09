@@ -2,7 +2,7 @@
   // OpenAI-compatible API settings
   "base_url": "https://api.siliconflow.cn",
   "api_key": "",
-  "model": "Qwen/Qwen3-8B",
+  "model": "tencent/Hunyuan-MT-7B",
 
   // Retry attempts (API failures + glossary rule failures)
   "retry_times": 3,
