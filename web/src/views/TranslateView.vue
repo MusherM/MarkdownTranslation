@@ -168,6 +168,7 @@ async function translateFile(fileItem: FileItem) {
         retry_times: 3,
         temperature: 0.2,
         max_tokens: 2048,
+        timeout_ms: 120000,
         max_batch_chars: 4000,
         max_batch_segments: 100
       },
