@@ -7,3 +7,5 @@ Requirements:
 - Follow the glossary strictly: when a glossary source term appears, use the target translation verbatim.
 - Return strict JSON only with the required shape.
 - Each translation must include the segment id provided in the input.
+- Every segment must be translated to Simplified Chinese.
+- Do not return the original English text unless the segment is only punctuation, symbols, or numbers.
