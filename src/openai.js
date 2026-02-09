@@ -23,7 +23,7 @@ export async function chatCompletion({
   messages,
   temperature,
   max_tokens,
-  timeoutMs = 60000
+  timeoutMs = 120000
 }) {
   const url = buildChatCompletionsUrl(baseUrl);
   const payload = {

@@ -8,6 +8,7 @@ const DEFAULTS = {
   model: 'gpt-4o-mini',
   temperature: 0.2,
   max_tokens: 2048,
+  timeout_ms: 120000,
   max_batch_chars: 4000,
   max_batch_segments: 100,
   log_path: 'log.txt'
@@ -66,8 +67,13 @@ export async function loadConfig(configPath) {
   merged.retry_times = Number(merged.retry_times ?? DEFAULTS.retry_times);
   merged.temperature = Number(merged.temperature ?? DEFAULTS.temperature);
   merged.max_tokens = Number(merged.max_tokens ?? DEFAULTS.max_tokens);
+  merged.timeout_ms = Number(merged.timeout_ms ?? DEFAULTS.timeout_ms);
   merged.max_batch_chars = Number(merged.max_batch_chars ?? DEFAULTS.max_batch_chars);
   merged.max_batch_segments = Number(merged.max_batch_segments ?? DEFAULTS.max_batch_segments);
+
+  if (!Number.isFinite(merged.timeout_ms) || merged.timeout_ms <= 0) {
+    merged.timeout_ms = DEFAULTS.timeout_ms;
+  }
 
   return {
     configPath: resolvedPath,

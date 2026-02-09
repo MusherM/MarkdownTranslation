@@ -16,6 +16,7 @@
   // Optional tuning
   "temperature": 0.2,
   "max_tokens": 8192,
+  "timeout_ms": 120000,
   "max_batch_chars": 4000,
   "max_batch_segments": 100
 }

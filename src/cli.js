@@ -15,6 +15,7 @@ function printUsage() {
 Options:
   -c, --config <path>   Path to config.jsonc or config.json
   -o, --output <path>   Output markdown path or directory
+  -f, --force           Overwrite existing translated files
   -h, --help            Show this help
 `);
 }
@@ -80,11 +81,11 @@ function createProgressHandler(label, stream) {
   };
 }
 
-async function translateOneFile({ filePath, outputPath, config, glossary, prompt, judgePrompt, logger, stream }) {
+async function translateOneFile({ filePath, outputPath, force, config, glossary, prompt, judgePrompt, logger, stream }) {
   const label = path.relative(process.cwd(), filePath) || path.basename(filePath);
   const progress = createProgressHandler(label, stream);
 
-  if (outputPath !== '-') {
+  if (outputPath !== '-' && !force) {
     try {
       await fs.access(outputPath);
       console.log(`Skipping existing translation: ${outputPath}`);
@@ -127,12 +128,15 @@ async function main() {
   let inputPath;
   let outputPath;
   let configPath;
+  let force = false;
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '-h' || arg === '--help') {
       printUsage();
       process.exit(0);
+    } else if (arg === '-f' || arg === '--force') {
+      force = true;
     } else if (arg === '-o' || arg === '--output') {
       outputPath = args[i + 1];
       i += 1;
@@ -201,6 +205,7 @@ async function main() {
       await translateOneFile({
         filePath,
         outputPath: finalOutputPath,
+        force,
         config,
         glossary,
         prompt,
@@ -230,6 +235,7 @@ async function main() {
   await translateOneFile({
     filePath: inputPath,
     outputPath: finalOutputPath,
+    force,
     config,
     glossary,
     prompt,
