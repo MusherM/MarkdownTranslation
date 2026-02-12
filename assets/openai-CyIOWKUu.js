@@ -1,0 +1,13 @@
+import{a1 as y,w as S,r as T}from"./index-SuxVkdjs.js";const p="md-translate-config",f={baseUrl:"https://api.openai.com/v1",apiKey:"",modelName:"gpt-4o-mini",translateMarkdownCodeBlocks:!1},$=y("config",()=>{const e=T({...f});function r(){try{const n=localStorage.getItem(p);if(n){const l=JSON.parse(n);e.value={...f,...l}}}catch(n){console.error("加载配置失败:",n)}}function a(){try{localStorage.setItem(p,JSON.stringify(e.value))}catch(n){console.error("保存配置失败:",n)}}function c(){e.value={...f}}return S(e,a,{deep:!0}),r(),{config:e,loadFromStorage:r,saveToStorage:a,reset:c}});function b(e){const r=e.replace(/\/$/,"");return r.endsWith("/v1")?`${r}/chat/completions`:`${r}/v1/chat/completions`}function N(e){const r={"Content-Type":"application/json"};return e&&(r.Authorization=`Bearer ${e}`),r}function v(e){return e instanceof TypeError&&(e.message.includes("fetch")||e.message.includes("CORS")||e.message.includes("Failed to fetch")||e.message.includes("NetworkError"))}function A(){return`CORS 错误：浏览器无法直接访问该 API。
+
+可能的原因：
+1. API 服务器未配置 CORS 头
+2. 需要配置代理服务器
+
+解决方案：
+1. 使用支持 CORS 的代理服务器（如 Cloudflare Worker）
+2. 在配置中设置代理 URL
+3. 联系 API 提供商启用 CORS
+
+示例代理配置：
+https://github.com/your-proxy-server`}function O(e){if(!e)return;const r=Number(e);if(Number.isFinite(r)&&r>=0)return Math.floor(r*1e3);const a=Date.parse(e);if(Number.isNaN(a))return;const c=a-Date.now();return c>0?c:0}function k(e){return e.name==="AbortError"||e instanceof Error&&e.message.includes("aborted")}async function M(e){const{baseUrl:r,apiKey:a,model:c,messages:n,temperature:l,max_tokens:C,timeoutMs:m=12e4}=e,E=b(r),g={model:c,messages:n,temperature:l,max_tokens:C},d=new AbortController,w=setTimeout(()=>d.abort(),m);try{const t=await fetch(E,{method:"POST",headers:N(a),body:JSON.stringify(g),signal:d.signal}),i=await t.text();if(!t.ok){const s=new Error(`API error ${t.status}: ${i}`);throw s.statusCode=t.status,s.isCorsError=!1,s.isTimeout=!1,s.retryAfterMs=O(t.headers.get("retry-after")),s}const h=JSON.parse(i).choices?.[0]?.message?.content;if(!h){const s=new Error("Empty response content from API");throw s.statusCode=void 0,s.isCorsError=!1,s.isTimeout=!1,s}return h}catch(t){if(t instanceof Error){const u=t;if(v(t)){const o=new Error(A());throw o.isCorsError=!0,o.isTimeout=!1,o.statusCode=void 0,o}if(k(t)){const o=new Error(`请求超时（${m}ms）：服务器响应时间过长，请稍后重试或尝试减少文本长度`);throw o.isTimeout=!0,o.isCorsError=!1,o.statusCode=void 0,o}throw u.isCorsError=!1,u.isTimeout=!1,u}const i=new Error("Unknown error occurred");throw i.isCorsError=!1,i.isTimeout=!1,i.statusCode=void 0,i}finally{clearTimeout(w)}}export{M as c,$ as u};
