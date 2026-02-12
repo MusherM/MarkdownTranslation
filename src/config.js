@@ -9,10 +9,15 @@ const DEFAULTS = {
   temperature: 0.2,
   max_tokens: 2048,
   timeout_ms: 120000,
-  max_batch_chars: 4000,
+  max_batch_tokens: 3000,
   max_batch_segments: 100,
+  retry_base_delay_ms: 500,
+  retry_max_delay_ms: 8000,
   log_path: 'log.txt'
 };
+
+const DEFAULT_BATCH_CHARS_PER_TOKEN = 8;
+const DEFAULT_MIN_BATCH_CHARS = 4000;
 
 async function fileExists(filePath) {
   try {
@@ -30,6 +35,87 @@ async function readJsoncFile(filePath) {
     throw new Error(`Config must be a JSON object: ${filePath}`);
   }
   return data;
+}
+
+function hasConfigValue(value) {
+  if (value === undefined || value === null) {
+    return false;
+  }
+  if (typeof value === 'string' && value.trim().length === 0) {
+    return false;
+  }
+  return true;
+}
+
+function parseOptionalNumber(value) {
+  if (!hasConfigValue(value)) {
+    return undefined;
+  }
+  return Number(value);
+}
+
+function deriveMaxBatchChars(maxBatchTokens) {
+  return Math.max(
+    DEFAULT_MIN_BATCH_CHARS,
+    Math.ceil(maxBatchTokens * DEFAULT_BATCH_CHARS_PER_TOKEN)
+  );
+}
+
+function ensureNonEmptyString(value, fieldName) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`Invalid config "${fieldName}": expected a non-empty string`);
+  }
+  return value;
+}
+
+function ensureInteger(value, fieldName, { min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY } = {}) {
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric < min || numeric > max) {
+    throw new Error(
+      `Invalid config "${fieldName}": expected integer in [${min}, ${max}], got ${value}`
+    );
+  }
+  return numeric;
+}
+
+function ensureNumber(value, fieldName, { min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY } = {}) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < min || numeric > max) {
+    throw new Error(
+      `Invalid config "${fieldName}": expected number in [${min}, ${max}], got ${value}`
+    );
+  }
+  return numeric;
+}
+
+function validateAndNormalizeConfig(config) {
+  const normalized = {
+    ...config
+  };
+
+  normalized.base_url = ensureNonEmptyString(normalized.base_url, 'base_url');
+  normalized.model = ensureNonEmptyString(normalized.model, 'model');
+  normalized.log_path = ensureNonEmptyString(normalized.log_path, 'log_path');
+
+  normalized.retry_times = ensureInteger(normalized.retry_times, 'retry_times', { min: 1, max: 20 });
+  normalized.temperature = ensureNumber(normalized.temperature, 'temperature', { min: 0, max: 2 });
+  normalized.max_tokens = ensureInteger(normalized.max_tokens, 'max_tokens', { min: 1 });
+  normalized.timeout_ms = ensureInteger(normalized.timeout_ms, 'timeout_ms', { min: 1000 });
+  normalized.max_batch_tokens = ensureInteger(normalized.max_batch_tokens, 'max_batch_tokens', { min: 128 });
+  if (hasConfigValue(normalized.max_batch_chars)) {
+    normalized.max_batch_chars = ensureInteger(normalized.max_batch_chars, 'max_batch_chars', { min: 1 });
+  } else {
+    normalized.max_batch_chars = deriveMaxBatchChars(normalized.max_batch_tokens);
+  }
+  normalized.max_batch_segments = ensureInteger(normalized.max_batch_segments, 'max_batch_segments', { min: 1 });
+  normalized.retry_base_delay_ms = ensureInteger(normalized.retry_base_delay_ms, 'retry_base_delay_ms', { min: 0, max: 60000 });
+  normalized.retry_max_delay_ms = ensureInteger(normalized.retry_max_delay_ms, 'retry_max_delay_ms', { min: 100, max: 120000 });
+
+  if (normalized.retry_max_delay_ms < normalized.retry_base_delay_ms) {
+    throw new Error('Invalid config "retry_max_delay_ms": must be greater than or equal to retry_base_delay_ms');
+  }
+
+  return normalized;
 }
 
 export async function loadConfig(configPath) {
@@ -68,15 +154,16 @@ export async function loadConfig(configPath) {
   merged.temperature = Number(merged.temperature ?? DEFAULTS.temperature);
   merged.max_tokens = Number(merged.max_tokens ?? DEFAULTS.max_tokens);
   merged.timeout_ms = Number(merged.timeout_ms ?? DEFAULTS.timeout_ms);
-  merged.max_batch_chars = Number(merged.max_batch_chars ?? DEFAULTS.max_batch_chars);
+  merged.max_batch_tokens = Number(merged.max_batch_tokens ?? DEFAULTS.max_batch_tokens);
+  merged.max_batch_chars = parseOptionalNumber(merged.max_batch_chars);
   merged.max_batch_segments = Number(merged.max_batch_segments ?? DEFAULTS.max_batch_segments);
+  merged.retry_base_delay_ms = Number(merged.retry_base_delay_ms ?? DEFAULTS.retry_base_delay_ms);
+  merged.retry_max_delay_ms = Number(merged.retry_max_delay_ms ?? DEFAULTS.retry_max_delay_ms);
 
-  if (!Number.isFinite(merged.timeout_ms) || merged.timeout_ms <= 0) {
-    merged.timeout_ms = DEFAULTS.timeout_ms;
-  }
+  const validated = validateAndNormalizeConfig(merged);
 
   return {
     configPath: resolvedPath,
-    config: merged
+    config: validated
   };
 }

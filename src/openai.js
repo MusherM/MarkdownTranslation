@@ -16,6 +16,25 @@ function buildHeaders(apiKey) {
   return headers;
 }
 
+function parseRetryAfterMs(value) {
+  if (!value) {
+    return undefined;
+  }
+  const asNumber = Number(value);
+  if (Number.isFinite(asNumber) && asNumber >= 0) {
+    return Math.floor(asNumber * 1000);
+  }
+  const asDate = Date.parse(value);
+  if (Number.isNaN(asDate)) {
+    return undefined;
+  }
+  const delta = asDate - Date.now();
+  if (delta <= 0) {
+    return 0;
+  }
+  return delta;
+}
+
 export async function chatCompletion({
   baseUrl,
   apiKey,
@@ -46,7 +65,11 @@ export async function chatCompletion({
 
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`API error ${response.status}: ${text}`);
+      const error = new Error(`API error ${response.status}: ${text}`);
+      error.statusCode = response.status;
+      error.responseBody = text;
+      error.retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
+      throw error;
     }
 
     const data = JSON.parse(text);
@@ -56,6 +79,13 @@ export async function chatCompletion({
     }
 
     return content;
+  } catch (error) {
+    if (error && typeof error === 'object') {
+      if (!('isTimeout' in error)) {
+        error.isTimeout = error.name === 'AbortError';
+      }
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
   }

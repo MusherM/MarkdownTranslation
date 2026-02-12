@@ -17,6 +17,13 @@
   "temperature": 0.2,
   "max_tokens": 8192,
   "timeout_ms": 120000,
-  "max_batch_chars": 4000,
-  "max_batch_segments": 100
+  // Main batching limit by estimated tokens (controls context budget)
+  "max_batch_tokens": 3000,
+  // Optional override: hard character cap per batch.
+  // If omitted, it is auto-derived from max_batch_tokens (roughly 8 chars/token, with a floor).
+  // "max_batch_chars": 24000,
+  "max_batch_segments": 100,
+  // Tiered retry backoff window (milliseconds)
+  "retry_base_delay_ms": 500,
+  "retry_max_delay_ms": 8000
 }

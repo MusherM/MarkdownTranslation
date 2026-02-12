@@ -46,8 +46,10 @@ Create `config.jsonc` (or `config.json`). Example:
   "temperature": 0.2,
   "max_tokens": 2048,
   "timeout_ms": 120000,
-  "max_batch_chars": 4000,
+  "max_batch_tokens": 3000,
   "max_batch_segments": 100,
+  "retry_base_delay_ms": 500,
+  "retry_max_delay_ms": 8000,
   "log_path": "log.txt"
 }
 ```
@@ -72,6 +74,9 @@ If a source term appears in any translated segment, the output must contain the 
 - A thin green progress bar is shown per document during translation (TTY only).
 - If a translated output file already exists (e.g., `foo.zh.md`), the file is skipped by default. Use `--force` to overwrite.
 - Failures are logged to `log.txt` by default (including model inputs/outputs for debugging). You can change the path with `log_path`.
+- `max_batch_tokens` is the primary batch-size knob.
+- `max_batch_chars` is optional; if omitted, it is auto-derived from `max_batch_tokens` (you can still set it as an advanced override).
+- Retries use tiered backoff: fast retry for response-shape issues, exponential backoff for timeout/network/5xx, and `Retry-After` for 429.
 
 ## Prompt
 The base prompt is stored in `prompts/translate.md`. You can override it with `prompt_path` in config.

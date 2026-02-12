@@ -26,8 +26,11 @@ export interface TranslatorConfig {
   temperature: number;
   max_tokens: number;
   timeout_ms?: number;
-  max_batch_chars: number;
+  max_batch_chars?: number;
+  max_batch_tokens?: number;
   max_batch_segments: number;
+  retry_base_delay_ms?: number;
+  retry_max_delay_ms?: number;
 }
 
 export type Glossary = Record<string, string>;
@@ -99,6 +102,134 @@ type CountMismatchError = Error & {
   pendingCount?: number;
   attempts?: number;
 };
+
+type RuntimeTranslatorConfig = TranslatorConfig & {
+  timeout_ms: number;
+  max_batch_chars: number;
+  max_batch_tokens: number;
+  retry_base_delay_ms: number;
+  retry_max_delay_ms: number;
+};
+
+type RetryPolicy = {
+  retryable: boolean;
+  category:
+    | 'rate_limit'
+    | 'transient_http'
+    | 'server_error'
+    | 'client_error'
+    | 'timeout'
+    | 'network'
+    | 'response_shape'
+    | 'unknown';
+  statusCode?: number;
+};
+
+const DEFAULT_TIMEOUT_MS = 120000;
+const DEFAULT_MAX_BATCH_TOKENS = 3000;
+const DEFAULT_BATCH_CHARS_PER_TOKEN = 8;
+const DEFAULT_MIN_BATCH_CHARS = 4000;
+const DEFAULT_RETRY_BASE_DELAY_MS = 500;
+const DEFAULT_RETRY_MAX_DELAY_MS = 8000;
+
+function ensureNonEmptyString(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`Invalid config "${fieldName}": expected a non-empty string`);
+  }
+  return value;
+}
+
+function ensureInteger(
+  value: unknown,
+  fieldName: string,
+  bounds: { min?: number; max?: number } = {}
+): number {
+  const min = bounds.min ?? Number.NEGATIVE_INFINITY;
+  const max = bounds.max ?? Number.POSITIVE_INFINITY;
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric < min || numeric > max) {
+    throw new Error(
+      `Invalid config "${fieldName}": expected integer in [${min}, ${max}], got ${String(value)}`
+    );
+  }
+  return numeric;
+}
+
+function ensureNumber(
+  value: unknown,
+  fieldName: string,
+  bounds: { min?: number; max?: number } = {}
+): number {
+  const min = bounds.min ?? Number.NEGATIVE_INFINITY;
+  const max = bounds.max ?? Number.POSITIVE_INFINITY;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < min || numeric > max) {
+    throw new Error(
+      `Invalid config "${fieldName}": expected number in [${min}, ${max}], got ${String(value)}`
+    );
+  }
+  return numeric;
+}
+
+function hasConfigValue(value: unknown): boolean {
+  if (value === undefined || value === null) {
+    return false;
+  }
+  if (typeof value === 'string' && value.trim().length === 0) {
+    return false;
+  }
+  return true;
+}
+
+function deriveMaxBatchChars(maxBatchTokens: number): number {
+  return Math.max(
+    DEFAULT_MIN_BATCH_CHARS,
+    Math.ceil(maxBatchTokens * DEFAULT_BATCH_CHARS_PER_TOKEN)
+  );
+}
+
+function normalizeTranslatorConfig(config: TranslatorConfig): RuntimeTranslatorConfig {
+  const initialMaxBatchTokens = config.max_batch_tokens ?? DEFAULT_MAX_BATCH_TOKENS;
+  const normalized: RuntimeTranslatorConfig = {
+    ...config,
+    timeout_ms: config.timeout_ms ?? DEFAULT_TIMEOUT_MS,
+    max_batch_chars: hasConfigValue(config.max_batch_chars)
+      ? Number(config.max_batch_chars)
+      : deriveMaxBatchChars(Number(initialMaxBatchTokens)),
+    max_batch_tokens: initialMaxBatchTokens,
+    retry_base_delay_ms: config.retry_base_delay_ms ?? DEFAULT_RETRY_BASE_DELAY_MS,
+    retry_max_delay_ms: config.retry_max_delay_ms ?? DEFAULT_RETRY_MAX_DELAY_MS
+  };
+
+  normalized.base_url = ensureNonEmptyString(normalized.base_url, 'base_url');
+  normalized.model = ensureNonEmptyString(normalized.model, 'model');
+
+  normalized.retry_times = ensureInteger(normalized.retry_times, 'retry_times', { min: 1, max: 20 });
+  normalized.temperature = ensureNumber(normalized.temperature, 'temperature', { min: 0, max: 2 });
+  normalized.max_tokens = ensureInteger(normalized.max_tokens, 'max_tokens', { min: 1 });
+  normalized.timeout_ms = ensureInteger(normalized.timeout_ms, 'timeout_ms', { min: 1000 });
+  normalized.max_batch_tokens = ensureInteger(normalized.max_batch_tokens, 'max_batch_tokens', { min: 128 });
+  normalized.max_batch_chars = ensureInteger(normalized.max_batch_chars, 'max_batch_chars', { min: 1 });
+  normalized.max_batch_segments = ensureInteger(normalized.max_batch_segments, 'max_batch_segments', { min: 1 });
+  normalized.retry_base_delay_ms = ensureInteger(
+    normalized.retry_base_delay_ms,
+    'retry_base_delay_ms',
+    { min: 0, max: 60000 }
+  );
+  normalized.retry_max_delay_ms = ensureInteger(
+    normalized.retry_max_delay_ms,
+    'retry_max_delay_ms',
+    { min: 100, max: 120000 }
+  );
+
+  if (normalized.retry_max_delay_ms < normalized.retry_base_delay_ms) {
+    throw new Error(
+      'Invalid config "retry_max_delay_ms": must be greater than or equal to retry_base_delay_ms'
+    );
+  }
+
+  return normalized;
+}
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -271,29 +402,107 @@ function normalizeTrailingNewline(original: string, translated: string): string 
   return translated.replace(/\r?\n$/, '');
 }
 
+function isAsciiWordCode(code: number): boolean {
+  return (
+    (code >= 48 && code <= 57) || // 0-9
+    (code >= 65 && code <= 90) || // A-Z
+    (code >= 97 && code <= 122) || // a-z
+    code === 95 // _
+  );
+}
+
+function isCjkCodePoint(codePoint: number): boolean {
+  return (
+    (codePoint >= 0x3400 && codePoint <= 0x4dbf) ||
+    (codePoint >= 0x4e00 && codePoint <= 0x9fff) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0x3040 && codePoint <= 0x30ff) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7af)
+  );
+}
+
+function estimateTokens(text: string): number {
+  if (!text) {
+    return 0;
+  }
+
+  let tokens = 0;
+  let asciiRun = 0;
+
+  const flushAsciiRun = (): void => {
+    if (asciiRun > 0) {
+      tokens += Math.ceil(asciiRun / 4);
+      asciiRun = 0;
+    }
+  };
+
+  for (const char of text) {
+    const codePoint = char.codePointAt(0);
+    if (typeof codePoint !== 'number') {
+      continue;
+    }
+
+    if (codePoint <= 0x7f && isAsciiWordCode(codePoint)) {
+      asciiRun += 1;
+      continue;
+    }
+
+    flushAsciiRun();
+
+    if (char === ' ' || char === '\n' || char === '\r' || char === '\t') {
+      continue;
+    }
+
+    if (isCjkCodePoint(codePoint)) {
+      tokens += 1;
+      continue;
+    }
+
+    tokens += 1;
+  }
+
+  flushAsciiRun();
+
+  return Math.max(1, Math.ceil(tokens * 1.1));
+}
+
+function estimateSegmentTokens(text: string): number {
+  return estimateTokens(text) + 12;
+}
+
 function buildBatches(
   indices: number[],
   segments: Segment[],
-  maxChars: number,
-  maxSegments: number
+  limits: {
+    maxChars: number;
+    maxTokens: number;
+    maxSegments: number;
+    baseTokens: number;
+  }
 ): number[][] {
   const batches: number[][] = [];
   let current: number[] = [];
   let charCount = 0;
+  let tokenCount = limits.baseTokens;
 
   for (const index of indices) {
-    const length = segments[index].text.length;
-    const exceedsCount = current.length >= maxSegments;
-    const exceedsChars = charCount + length > maxChars && current.length > 0;
+    const text = segments[index].text;
+    const length = text.length;
+    const estimatedTokens = estimateSegmentTokens(text);
+    const exceedsCount = current.length >= limits.maxSegments;
+    const exceedsChars = charCount + length > limits.maxChars && current.length > 0;
+    const exceedsTokens = tokenCount + estimatedTokens > limits.maxTokens && current.length > 0;
 
-    if (exceedsCount || exceedsChars) {
+    if (exceedsCount || exceedsChars || exceedsTokens) {
       batches.push(current);
       current = [];
       charCount = 0;
+      tokenCount = limits.baseTokens;
     }
 
     current.push(index);
     charCount += length;
+    tokenCount += estimatedTokens;
   }
 
   if (current.length > 0) {
@@ -530,6 +739,135 @@ function isBatchFailedError(error: unknown): boolean {
   return typedError.code === 'TRANSLATION_BATCH_FAILED';
 }
 
+function extractStatusCode(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+  const statusCode = (error as { statusCode?: unknown }).statusCode;
+  if (Number.isInteger(statusCode)) {
+    return Number(statusCode);
+  }
+  const message = (error as { message?: unknown }).message;
+  if (typeof message !== 'string') {
+    return undefined;
+  }
+  const match = message.match(/\bAPI error (\d{3})\b/i);
+  if (!match) {
+    return undefined;
+  }
+  return Number(match[1]);
+}
+
+function extractRetryAfterMs(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+  const retryAfterMs = (error as { retryAfterMs?: unknown }).retryAfterMs;
+  if (Number.isFinite(retryAfterMs) && Number(retryAfterMs) >= 0) {
+    return Math.floor(Number(retryAfterMs));
+  }
+  return undefined;
+}
+
+function classifyRetryPolicy(error: unknown): RetryPolicy {
+  const statusCode = extractStatusCode(error);
+  const message = error && typeof error === 'object' && typeof (error as { message?: unknown }).message === 'string'
+    ? (error as { message: string }).message
+    : '';
+  const lowered = message.toLowerCase();
+
+  if (isCountMismatchError(error)) {
+    return { retryable: true, category: 'response_shape', statusCode };
+  }
+
+  if (statusCode === 429) {
+    return { retryable: true, category: 'rate_limit', statusCode };
+  }
+
+  if (statusCode === 408 || statusCode === 409 || statusCode === 425) {
+    return { retryable: true, category: 'transient_http', statusCode };
+  }
+
+  if (typeof statusCode === 'number' && statusCode >= 500) {
+    return { retryable: true, category: 'server_error', statusCode };
+  }
+
+  if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
+    return { retryable: false, category: 'client_error', statusCode };
+  }
+
+  const timeoutFlag = error && typeof error === 'object'
+    ? Boolean(
+      (error as { isTimeout?: unknown; name?: unknown }).isTimeout === true ||
+      (error as { name?: unknown }).name === 'AbortError'
+    )
+    : false;
+  const timeoutLike = timeoutFlag || lowered.includes('timeout') || lowered.includes('timed out') || lowered.includes('aborted');
+  if (timeoutLike) {
+    return { retryable: true, category: 'timeout', statusCode };
+  }
+
+  const networkLike = /(network|fetch failed|socket hang up|econnreset|enotfound|eai_again|econnrefused|failed to fetch)/i.test(message);
+  if (networkLike) {
+    return { retryable: true, category: 'network', statusCode };
+  }
+
+  const parseLike = /(json|parse|response missing|incorrect number of translations)/i.test(message);
+  if (parseLike) {
+    return { retryable: true, category: 'response_shape', statusCode };
+  }
+
+  return { retryable: true, category: 'unknown', statusCode };
+}
+
+function computeRetryDelayMs(params: {
+  attempt: number;
+  config: RuntimeTranslatorConfig;
+  retryPolicy: RetryPolicy;
+  error: unknown;
+}): number {
+  const boundedBase = Math.max(0, Math.floor(params.config.retry_base_delay_ms));
+  const boundedMax = Math.max(boundedBase, Math.floor(params.config.retry_max_delay_ms));
+  const exponent = Math.max(0, params.attempt - 1);
+  const jitter = (cap: number): number => Math.floor(Math.random() * cap);
+
+  if (params.retryPolicy.category === 'rate_limit') {
+    const retryAfterMs = extractRetryAfterMs(params.error);
+    if (typeof retryAfterMs === 'number') {
+      return Math.min(boundedMax, Math.max(boundedBase, retryAfterMs));
+    }
+    const delay = boundedBase * 2 * (2 ** exponent) + jitter(Math.max(50, Math.floor(boundedBase * 0.5)));
+    return Math.min(boundedMax, delay);
+  }
+
+  if (
+    params.retryPolicy.category === 'server_error' ||
+    params.retryPolicy.category === 'network' ||
+    params.retryPolicy.category === 'timeout' ||
+    params.retryPolicy.category === 'transient_http' ||
+    params.retryPolicy.category === 'unknown'
+  ) {
+    const delay = boundedBase * (2 ** exponent) + jitter(Math.max(50, Math.floor(boundedBase * 0.3)));
+    return Math.min(boundedMax, delay);
+  }
+
+  if (params.retryPolicy.category === 'response_shape') {
+    const shapeDelay = 200 * (2 ** exponent) + jitter(80);
+    return Math.min(boundedMax, Math.max(100, shapeDelay));
+  }
+
+  return boundedBase;
+}
+
+async function wait(ms: number): Promise<void> {
+  if (!ms || ms <= 0) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function unionGlossaryEntries(segmentsTerms: GlossaryEntry[][]): GlossaryEntry[] {
   const map = new Map<string, GlossaryEntry>();
   for (const list of segmentsTerms) {
@@ -580,7 +918,7 @@ async function translateBatch(params: {
   segments: SegmentInput[];
   glossaryEntries: GlossaryEntry[];
   missingEntries?: GlossaryEntry[];
-  config: TranslatorConfig;
+  config: RuntimeTranslatorConfig;
   prompt: string;
   logger?: TranslatorLogger;
   chatCompletion: ChatCompletionFunction;
@@ -698,7 +1036,7 @@ async function translateBatch(params: {
 
 async function judgeGlossaryTranslations(params: {
   items: Array<Record<string, unknown>>;
-  config: TranslatorConfig;
+  config: RuntimeTranslatorConfig;
   judgePrompt?: string;
   logger?: TranslatorLogger;
   chatCompletion: ChatCompletionFunction;
@@ -787,7 +1125,7 @@ async function translateBatchWithRetries(params: {
   batchIndices: number[];
   segments: Segment[];
   segmentTerms: GlossaryEntry[][];
-  config: TranslatorConfig;
+  config: RuntimeTranslatorConfig;
   prompt: string;
   judgePrompt?: string;
   translations: string[];
@@ -894,6 +1232,33 @@ async function translateBatchWithRetries(params: {
         console.warn(`Glossary check failed. Retrying. Missing terms: ${missingList}`);
       }
     } catch (error) {
+      const retryPolicy = classifyRetryPolicy(error);
+
+      if (!retryPolicy.retryable) {
+        if (!lastSuccessful) {
+          if (params.logger?.error) {
+            await params.logger.error('translation_non_retryable_error', {
+              error: (error as Error).message || String(error),
+              category: retryPolicy.category,
+              status_code: retryPolicy.statusCode
+            });
+          }
+          throw error;
+        }
+
+        console.warn('Non-retryable translation error encountered. Using last available translations.');
+        if (params.logger?.warn) {
+          await params.logger.warn('translation_non_retryable_after_success', {
+            error: (error as Error).message || String(error),
+            category: retryPolicy.category,
+            status_code: retryPolicy.statusCode,
+            pendingCount: pending.length
+          });
+        }
+        pending = [];
+        break;
+      }
+
       if (attempt >= params.config.retry_times) {
         if (isCountMismatchError(error) && params.batchIndices.length > 1) {
           throw error;
@@ -923,12 +1288,30 @@ async function translateBatchWithRetries(params: {
         pending = [];
         break;
       }
-      console.warn(`Translation attempt failed. Retrying. Error: ${(error as Error).message}`);
+
+      const retryDelayMs = computeRetryDelayMs({
+        attempt,
+        config: params.config,
+        retryPolicy,
+        error
+      });
+      const statusPart = typeof retryPolicy.statusCode === 'number'
+        ? ` (status ${retryPolicy.statusCode})`
+        : '';
+      console.warn(
+        `Translation attempt failed${statusPart}. Retrying in ${retryDelayMs}ms. Error: ${(error as Error).message}`
+      );
       if (params.logger?.warn) {
         await params.logger.warn('translation_attempt_failed', {
-          error: (error as Error).message || String(error)
+          error: (error as Error).message || String(error),
+          category: retryPolicy.category,
+          status_code: retryPolicy.statusCode,
+          retry_delay_ms: retryDelayMs,
+          attempt,
+          max_attempts: params.config.retry_times
         });
       }
+      await wait(retryDelayMs);
     }
   }
 
@@ -949,7 +1332,7 @@ async function translateBatchWithRetries(params: {
 async function translateSegmentsWithRetries(params: {
   segments: Segment[];
   segmentTerms: GlossaryEntry[][];
-  config: TranslatorConfig;
+  config: RuntimeTranslatorConfig;
   prompt: string;
   judgePrompt?: string;
   onProgress?: (update: ProgressUpdate) => void;
@@ -975,7 +1358,13 @@ async function translateSegmentsWithRetries(params: {
       params.onProgress({ done: 0, total: totalSegments });
     }
   }
-  const batches = buildBatches(indices, params.segments, params.config.max_batch_chars, params.config.max_batch_segments);
+  const baseRequestTokens = estimateTokens(params.prompt) + 96;
+  const batches = buildBatches(indices, params.segments, {
+    maxChars: params.config.max_batch_chars,
+    maxTokens: params.config.max_batch_tokens,
+    maxSegments: params.config.max_batch_segments,
+    baseTokens: baseRequestTokens
+  });
 
   for (const batchIndices of batches) {
     try {
@@ -1025,7 +1414,7 @@ async function translateSegmentsWithRetries(params: {
 
 async function translateMarkdownInternal(
   source: string,
-  options: TranslateMarkdownOptions,
+  options: TranslateMarkdownOptions & { config: RuntimeTranslatorConfig },
   reportProgress: boolean
 ): Promise<string> {
   const processor = unified()
@@ -1089,5 +1478,9 @@ async function translateMarkdownInternal(
 }
 
 export async function translateMarkdown(source: string, options: TranslateMarkdownOptions): Promise<string> {
-  return translateMarkdownInternal(source, options, true);
+  const normalizedOptions: TranslateMarkdownOptions & { config: RuntimeTranslatorConfig } = {
+    ...options,
+    config: normalizeTranslatorConfig(options.config)
+  };
+  return translateMarkdownInternal(source, normalizedOptions, true);
 }

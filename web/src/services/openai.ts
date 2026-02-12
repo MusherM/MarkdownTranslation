@@ -22,6 +22,7 @@ export interface ChatCompletionError extends Error {
   isCorsError?: boolean
   isTimeout?: boolean
   statusCode?: number
+  retryAfterMs?: number
 }
 
 export interface ChatCompletionResponse {
@@ -102,6 +103,25 @@ function createCorsErrorMessage(): string {
 https://github.com/your-proxy-server`
 }
 
+function parseRetryAfterMs(value: string | null): number | undefined {
+  if (!value) {
+    return undefined
+  }
+
+  const asNumber = Number(value)
+  if (Number.isFinite(asNumber) && asNumber >= 0) {
+    return Math.floor(asNumber * 1000)
+  }
+
+  const asDate = Date.parse(value)
+  if (Number.isNaN(asDate)) {
+    return undefined
+  }
+
+  const delta = asDate - Date.now()
+  return delta > 0 ? delta : 0
+}
+
 /**
  * 检测是否为超时错误
  */
@@ -160,6 +180,7 @@ export async function chatCompletion(
       error.statusCode = response.status
       error.isCorsError = false
       error.isTimeout = false
+      error.retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'))
       throw error
     }
 

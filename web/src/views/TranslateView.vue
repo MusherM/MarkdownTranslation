@@ -169,7 +169,7 @@ async function translateFile(fileItem: FileItem) {
         temperature: 0.2,
         max_tokens: 2048,
         timeout_ms: 120000,
-        max_batch_chars: 4000,
+        max_batch_tokens: 3000,
         max_batch_segments: 100
       },
       glossary: glossaryStore.glossary,

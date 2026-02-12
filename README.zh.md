@@ -51,8 +51,10 @@ node src/cli.js ./docs -c config.jsonc
   "temperature": 0.2,
   "max_tokens": 2048,
   "timeout_ms": 120000,
-  "max_batch_chars": 4000,
+  "max_batch_tokens": 3000,
   "max_batch_segments": 100,
+  "retry_base_delay_ms": 500,
+  "retry_max_delay_ms": 8000,
   "log_path": "log.txt"
 }
 ```
@@ -79,6 +81,9 @@ node src/cli.js ./docs -c config.jsonc
 - 翻译过程中每个文档会显示一条细绿色进度条（仅 TTY 环境）。
 - 若目标翻译文件已存在（例如 `foo.zh.md`），默认会直接跳过；可使用 `--force` 强制覆盖。
 - 失败信息默认记录到 `log.txt`（包含模型输入/输出，便于排查），可通过 `log_path` 配置修改路径。
+- `max_batch_tokens` 是主要的批次大小参数。
+- `max_batch_chars` 为可选项；不配置时会根据 `max_batch_tokens` 自动推导（需要时仍可手动覆盖）。
+- 重试采用分级策略：响应格式问题快速重试；超时/网络/5xx 使用指数退避；429 优先遵循 `Retry-After`。
 
 ## 提示
 

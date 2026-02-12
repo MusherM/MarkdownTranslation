@@ -67,24 +67,98 @@ function collectSegments(tree) {
   return segments;
 }
 
-function buildBatches(indices, segments, maxChars, maxSegments) {
+function isAsciiWordCode(code) {
+  return (
+    (code >= 48 && code <= 57) || // 0-9
+    (code >= 65 && code <= 90) || // A-Z
+    (code >= 97 && code <= 122) || // a-z
+    code === 95 // _
+  );
+}
+
+function isCjkCodePoint(codePoint) {
+  return (
+    (codePoint >= 0x3400 && codePoint <= 0x4dbf) ||
+    (codePoint >= 0x4e00 && codePoint <= 0x9fff) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0x3040 && codePoint <= 0x30ff) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7af)
+  );
+}
+
+function estimateTokens(text) {
+  if (!text) {
+    return 0;
+  }
+
+  let tokens = 0;
+  let asciiRun = 0;
+
+  const flushAsciiRun = () => {
+    if (asciiRun > 0) {
+      tokens += Math.ceil(asciiRun / 4);
+      asciiRun = 0;
+    }
+  };
+
+  for (const char of text) {
+    const codePoint = char.codePointAt(0);
+    if (typeof codePoint !== 'number') {
+      continue;
+    }
+
+    if (codePoint <= 0x7f && isAsciiWordCode(codePoint)) {
+      asciiRun += 1;
+      continue;
+    }
+
+    flushAsciiRun();
+
+    if (char === ' ' || char === '\n' || char === '\r' || char === '\t') {
+      continue;
+    }
+
+    if (isCjkCodePoint(codePoint)) {
+      tokens += 1;
+      continue;
+    }
+
+    tokens += 1;
+  }
+
+  flushAsciiRun();
+
+  return Math.max(1, Math.ceil(tokens * 1.1));
+}
+
+function estimateSegmentTokens(text) {
+  return estimateTokens(text) + 12;
+}
+
+function buildBatches(indices, segments, { maxChars, maxTokens, maxSegments, baseTokens }) {
   const batches = [];
   let current = [];
   let charCount = 0;
+  let tokenCount = baseTokens;
 
   for (const index of indices) {
-    const length = segments[index].text.length;
+    const text = segments[index].text;
+    const length = text.length;
+    const estimatedTokens = estimateSegmentTokens(text);
     const exceedsCount = current.length >= maxSegments;
     const exceedsChars = charCount + length > maxChars && current.length > 0;
+    const exceedsTokens = tokenCount + estimatedTokens > maxTokens && current.length > 0;
 
-    if (exceedsCount || exceedsChars) {
+    if (exceedsCount || exceedsChars || exceedsTokens) {
       batches.push(current);
       current = [];
       charCount = 0;
+      tokenCount = baseTokens;
     }
 
     current.push(index);
     charCount += length;
+    tokenCount += estimatedTokens;
   }
 
   if (current.length > 0) {
@@ -282,6 +356,160 @@ function isBatchFailedError(error) {
     return false;
   }
   return error.code === 'TRANSLATION_BATCH_FAILED';
+}
+
+function extractStatusCode(error) {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+  if (Number.isInteger(error.statusCode)) {
+    return error.statusCode;
+  }
+  const message = typeof error.message === 'string' ? error.message : '';
+  const match = message.match(/\bAPI error (\d{3})\b/i);
+  if (!match) {
+    return undefined;
+  }
+  return Number(match[1]);
+}
+
+function extractRetryAfterMs(error) {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+  if (Number.isFinite(error.retryAfterMs) && error.retryAfterMs >= 0) {
+    return Math.floor(error.retryAfterMs);
+  }
+  return undefined;
+}
+
+function classifyRetryPolicy(error) {
+  const statusCode = extractStatusCode(error);
+  const message = error && typeof error.message === 'string' ? error.message : '';
+  const lowered = message.toLowerCase();
+
+  if (isCountMismatchError(error)) {
+    return {
+      retryable: true,
+      category: 'response_shape',
+      statusCode
+    };
+  }
+
+  if (statusCode === 429) {
+    return {
+      retryable: true,
+      category: 'rate_limit',
+      statusCode
+    };
+  }
+
+  if (statusCode === 408 || statusCode === 409 || statusCode === 425) {
+    return {
+      retryable: true,
+      category: 'transient_http',
+      statusCode
+    };
+  }
+
+  if (typeof statusCode === 'number' && statusCode >= 500) {
+    return {
+      retryable: true,
+      category: 'server_error',
+      statusCode
+    };
+  }
+
+  if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
+    return {
+      retryable: false,
+      category: 'client_error',
+      statusCode
+    };
+  }
+
+  const timeoutLike = Boolean(
+    error && (error.isTimeout === true || error.name === 'AbortError') ||
+      lowered.includes('timeout') ||
+      lowered.includes('timed out') ||
+      lowered.includes('aborted')
+  );
+  if (timeoutLike) {
+    return {
+      retryable: true,
+      category: 'timeout',
+      statusCode
+    };
+  }
+
+  const networkLike = /(network|fetch failed|socket hang up|econnreset|enotfound|eai_again|econnrefused|failed to fetch)/i.test(message);
+  if (networkLike) {
+    return {
+      retryable: true,
+      category: 'network',
+      statusCode
+    };
+  }
+
+  const parseLike = /(json|parse|response missing|incorrect number of translations)/i.test(message);
+  if (parseLike) {
+    return {
+      retryable: true,
+      category: 'response_shape',
+      statusCode
+    };
+  }
+
+  return {
+    retryable: true,
+    category: 'unknown',
+    statusCode
+  };
+}
+
+function computeRetryDelayMs({ attempt, config, retryPolicy, error }) {
+  const baseDelay = Number.isFinite(config.retry_base_delay_ms) ? config.retry_base_delay_ms : 500;
+  const maxDelay = Number.isFinite(config.retry_max_delay_ms) ? config.retry_max_delay_ms : 8000;
+  const boundedBase = Math.max(0, Math.floor(baseDelay));
+  const boundedMax = Math.max(boundedBase, Math.floor(maxDelay));
+  const exponent = Math.max(0, attempt - 1);
+  const jitter = (cap) => Math.floor(Math.random() * cap);
+
+  if (retryPolicy.category === 'rate_limit') {
+    const retryAfterMs = extractRetryAfterMs(error);
+    if (typeof retryAfterMs === 'number') {
+      return Math.min(boundedMax, Math.max(boundedBase, retryAfterMs));
+    }
+    const delay = boundedBase * 2 * (2 ** exponent) + jitter(Math.max(50, Math.floor(boundedBase * 0.5)));
+    return Math.min(boundedMax, delay);
+  }
+
+  if (
+    retryPolicy.category === 'server_error' ||
+    retryPolicy.category === 'network' ||
+    retryPolicy.category === 'timeout' ||
+    retryPolicy.category === 'transient_http' ||
+    retryPolicy.category === 'unknown'
+  ) {
+    const delay = boundedBase * (2 ** exponent) + jitter(Math.max(50, Math.floor(boundedBase * 0.3)));
+    return Math.min(boundedMax, delay);
+  }
+
+  if (retryPolicy.category === 'response_shape') {
+    const shapeDelay = 200 * (2 ** exponent) + jitter(80);
+    return Math.min(boundedMax, Math.max(100, shapeDelay));
+  }
+
+  return boundedBase;
+}
+
+function wait(ms) {
+  if (!ms || ms <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function unionGlossaryEntries(segmentsTerms) {
@@ -637,6 +865,33 @@ async function translateBatchWithRetries({
         console.warn(`Glossary check failed. Retrying. Missing terms: ${missingList}`);
       }
     } catch (error) {
+      const retryPolicy = classifyRetryPolicy(error);
+
+      if (!retryPolicy.retryable) {
+        if (!lastSuccessful) {
+          if (logger) {
+            await logger.error('translation_non_retryable_error', {
+              error: error.message || String(error),
+              category: retryPolicy.category,
+              status_code: retryPolicy.statusCode
+            });
+          }
+          throw error;
+        }
+
+        console.warn('Non-retryable translation error encountered. Using last available translations.');
+        if (logger) {
+          await logger.warn('translation_non_retryable_after_success', {
+            error: error.message || String(error),
+            category: retryPolicy.category,
+            status_code: retryPolicy.statusCode,
+            pendingCount: pending.length
+          });
+        }
+        pending = [];
+        break;
+      }
+
       if (attempt >= config.retry_times) {
         if (isCountMismatchError(error) && batchIndices.length > 1) {
           throw error;
@@ -666,12 +921,30 @@ async function translateBatchWithRetries({
         pending = [];
         break;
       }
-      console.warn(`Translation attempt failed. Retrying. Error: ${error.message}`);
+
+      const retryDelayMs = computeRetryDelayMs({
+        attempt,
+        config,
+        retryPolicy,
+        error
+      });
+      const statusPart = typeof retryPolicy.statusCode === 'number'
+        ? ` (status ${retryPolicy.statusCode})`
+        : '';
+      console.warn(
+        `Translation attempt failed${statusPart}. Retrying in ${retryDelayMs}ms. Error: ${error.message}`
+      );
       if (logger) {
         await logger.warn('translation_attempt_failed', {
-          error: error.message || String(error)
+          error: error.message || String(error),
+          category: retryPolicy.category,
+          status_code: retryPolicy.statusCode,
+          retry_delay_ms: retryDelayMs,
+          attempt,
+          max_attempts: config.retry_times
         });
       }
+      await wait(retryDelayMs);
     }
   }
 
@@ -717,7 +990,16 @@ async function translateSegmentsWithRetries({
       onProgress({ done: 0, total: totalSegments });
     }
   }
-  const batches = buildBatches(indices, segments, config.max_batch_chars, config.max_batch_segments);
+  const baseRequestTokens = estimateTokens(prompt) + 96;
+  const maxBatchTokens = Number.isFinite(config.max_batch_tokens)
+    ? config.max_batch_tokens
+    : Math.max(512, Math.floor(config.max_tokens * 1.5));
+  const batches = buildBatches(indices, segments, {
+    maxChars: config.max_batch_chars,
+    maxTokens: maxBatchTokens,
+    maxSegments: config.max_batch_segments,
+    baseTokens: baseRequestTokens
+  });
 
   for (const batchIndices of batches) {
     try {
