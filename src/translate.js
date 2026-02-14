@@ -3,8 +3,8 @@ import remarkParse from 'remark-parse';
 import remarkStringify from 'remark-stringify';
 import remarkGfm from 'remark-gfm';
 import remarkFrontmatter from 'remark-frontmatter';
-import { visit, SKIP } from 'unist-util-visit';
-import { chatCompletion } from './openai.js';
+import { visit, SKIP, EXIT } from 'unist-util-visit';
+import { chatCompletion as defaultChatCompletion } from './openai.js';
 
 const SKIP_TYPES = new Set([
   'code',
@@ -65,6 +65,118 @@ function collectSegments(tree) {
     }
   });
   return segments;
+}
+
+function isMarkdownFenceLanguage(lang) {
+  const normalized = (lang || '').trim().toLowerCase();
+  return normalized === 'md' || normalized === 'markdown';
+}
+
+const markdownProbeProcessor = unified()
+  .use(remarkParse)
+  .use(remarkGfm)
+  .use(remarkFrontmatter, ['yaml', 'toml']);
+
+const MARKDOWN_BLOCK_TYPES = new Set([
+  'heading',
+  'list',
+  'blockquote',
+  'thematicBreak',
+  'table',
+  'code',
+  'html',
+  'yaml',
+  'toml',
+  'definition',
+  'footnoteDefinition'
+]);
+
+const MARKDOWN_INLINE_TYPES = new Set([
+  'link',
+  'image',
+  'strong',
+  'emphasis',
+  'delete',
+  'inlineCode',
+  'footnoteReference',
+  'linkReference',
+  'imageReference',
+  'break'
+]);
+
+function isLikelyMarkdownCodeContent(value) {
+  const normalized = value.replace(/\r\n/g, '\n').trim();
+  if (!normalized) {
+    return false;
+  }
+
+  let parsed;
+  try {
+    parsed = markdownProbeProcessor.parse(normalized);
+  } catch {
+    return false;
+  }
+
+  if (!Array.isArray(parsed.children) || parsed.children.length === 0) {
+    return false;
+  }
+
+  let hasMarkdownSyntax = false;
+  visit(parsed, (node, _index, parent) => {
+    const type = node.type || '';
+    if (MARKDOWN_BLOCK_TYPES.has(type)) {
+      hasMarkdownSyntax = true;
+      return EXIT;
+    }
+    if (parent && parent.type === 'paragraph' && MARKDOWN_INLINE_TYPES.has(type)) {
+      hasMarkdownSyntax = true;
+      return EXIT;
+    }
+    return undefined;
+  });
+
+  return hasMarkdownSyntax;
+}
+
+function shouldTranslateMarkdownCodeBlock(lang, value) {
+  if (isMarkdownFenceLanguage(lang)) {
+    return true;
+  }
+  if ((lang || '').trim().length > 0) {
+    return false;
+  }
+  return isLikelyMarkdownCodeContent(value);
+}
+
+function collectMarkdownCodeBlockSegments(tree) {
+  const segments = [];
+  visit(tree, (node) => {
+    if (node.type !== 'code') {
+      return undefined;
+    }
+
+    const blockValue = node.value || '';
+    if (!shouldTranslateMarkdownCodeBlock(node.lang, blockValue)) {
+      return undefined;
+    }
+
+    segments.push({
+      text: blockValue,
+      set(value) {
+        node.value = value;
+      }
+    });
+    return undefined;
+  });
+  return segments;
+}
+
+function normalizeTrailingNewline(original, translated) {
+  const originalHasTrailingNewline = /\r?\n$/.test(original);
+  if (originalHasTrailingNewline) {
+    return translated;
+  }
+  return translated.replace(/\r?\n$/, '');
 }
 
 function isAsciiWordCode(code) {
@@ -225,13 +337,68 @@ function parseModelResponse(content) {
   try {
     return JSON.parse(text);
   } catch {
-    const start = text.indexOf('{');
-    const end = text.lastIndexOf('}');
-    if (start === -1 || end === -1 || end <= start) {
-      throw new Error('Failed to parse JSON from model response');
+    const fencePattern = /```(?:json)?\s*([\s\S]*?)```/ig;
+    let fenceMatch;
+    while ((fenceMatch = fencePattern.exec(text)) !== null) {
+      const candidate = fenceMatch[1].trim();
+      if (!candidate) {
+        continue;
+      }
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        // keep searching
+      }
     }
-    const slice = text.slice(start, end + 1);
-    return JSON.parse(slice);
+
+    for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+
+      for (let cursor = start; cursor < text.length; cursor += 1) {
+        const ch = text[cursor];
+
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (ch === '\\') {
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = !inString;
+          continue;
+        }
+
+        if (inString) {
+          continue;
+        }
+
+        if (ch === '{') {
+          depth += 1;
+          continue;
+        }
+        if (ch !== '}') {
+          continue;
+        }
+
+        depth -= 1;
+        if (depth !== 0) {
+          continue;
+        }
+
+        const candidate = text.slice(start, cursor + 1);
+        try {
+          return JSON.parse(candidate);
+        } catch {
+          break;
+        }
+      }
+    }
+
+    throw new Error('Failed to parse JSON from model response');
   }
 }
 
@@ -560,7 +727,8 @@ async function translateBatch({
   missingEntries,
   config,
   prompt,
-  logger
+  logger,
+  chatCompletionFn
 }) {
   const normalizedSegments = normalizeSegmentItems(segments);
   const payload = buildUserPayload({
@@ -580,9 +748,11 @@ async function translateBatch({
     }
   ];
 
+  const completionFn = chatCompletionFn || defaultChatCompletion;
+
   let content;
   try {
-    content = await chatCompletion({
+    content = await completionFn({
       baseUrl: config.base_url,
       apiKey: config.api_key,
       model: config.model,
@@ -677,7 +847,8 @@ async function judgeGlossaryTranslations({
   items,
   config,
   judgePrompt,
-  logger
+  logger,
+  chatCompletionFn
 }) {
   if (!judgePrompt || items.length === 0) {
     return new Map();
@@ -698,9 +869,11 @@ async function judgeGlossaryTranslations({
     }
   ];
 
+  const completionFn = chatCompletionFn || defaultChatCompletion;
+
   let content;
   try {
-    content = await chatCompletion({
+    content = await completionFn({
       baseUrl: config.base_url,
       apiKey: config.api_key,
       model: config.model,
@@ -765,7 +938,8 @@ async function translateBatchWithRetries({
   prompt,
   judgePrompt,
   translations,
-  logger
+  logger,
+  chatCompletionFn
 }) {
   let pending = [...batchIndices];
   let attempt = 0;
@@ -789,7 +963,8 @@ async function translateBatchWithRetries({
         missingEntries,
         config,
         prompt,
-        logger
+        logger,
+        chatCompletionFn
       });
 
       if (batchTranslations.length !== batchSegments.length) {
@@ -831,7 +1006,8 @@ async function translateBatchWithRetries({
             items: judgeItems,
             config,
             judgePrompt,
-            logger
+            logger,
+            chatCompletionFn
           });
           if (decisions.size > 0) {
             for (const [index, decision] of decisions.entries()) {
@@ -969,7 +1145,8 @@ async function translateSegmentsWithRetries({
   prompt,
   judgePrompt,
   onProgress,
-  logger
+  logger,
+  chatCompletionFn
 }) {
   const translations = new Array(segments.length);
   const indices = segments
@@ -1011,7 +1188,8 @@ async function translateSegmentsWithRetries({
         prompt,
         judgePrompt,
         translations,
-        logger
+        logger,
+        chatCompletionFn
       });
       doneSegments += batchIndices.length;
       if (onProgress) {
@@ -1029,7 +1207,8 @@ async function translateSegmentsWithRetries({
             prompt,
             judgePrompt,
             translations,
-            logger
+            logger,
+            chatCompletionFn
           });
           doneSegments += 1;
           if (onProgress) {
@@ -1045,7 +1224,7 @@ async function translateSegmentsWithRetries({
   return translations;
 }
 
-export async function translateMarkdown(source, { config, glossary, prompt, judgePrompt, onProgress, logger }) {
+async function translateMarkdownInternal(source, options, reportProgress) {
   const processor = unified()
     .use(remarkParse)
     .use(remarkGfm)
@@ -1058,32 +1237,54 @@ export async function translateMarkdown(source, { config, glossary, prompt, judg
 
   const tree = processor.parse(source);
   const segments = collectSegments(tree);
+  const markdownCodeSegments = options.translateMarkdownCodeBlocks
+    ? collectMarkdownCodeBlockSegments(tree)
+    : [];
 
-  if (segments.length === 0) {
-    if (onProgress) {
-      onProgress({ done: 1, total: 1 });
+  if (segments.length === 0 && markdownCodeSegments.length === 0) {
+    if (reportProgress && options.onProgress) {
+      options.onProgress({ done: 1, total: 1 });
     }
     return source;
   }
 
-  const glossaryEntries = buildGlossaryEntries(glossary);
-  const segmentTerms = segments.map((segment) => termsInText(segment.text, glossaryEntries));
+  if (segments.length > 0) {
+    const glossaryEntries = buildGlossaryEntries(options.glossary);
+    const segmentTerms = segments.map((segment) => termsInText(segment.text, glossaryEntries));
 
-  const translations = await translateSegmentsWithRetries({
-    segments,
-    segmentTerms,
-    config,
-    prompt,
-    judgePrompt,
-    onProgress,
-    logger
-  });
+    const translations = await translateSegmentsWithRetries({
+      segments,
+      segmentTerms,
+      config: options.config,
+      prompt: options.prompt,
+      judgePrompt: options.judgePrompt,
+      onProgress: reportProgress ? options.onProgress : undefined,
+      logger: options.logger,
+      chatCompletionFn: options.chatCompletion
+    });
 
-  segments.forEach((segment, index) => {
-    segment.set(translations[index]);
-  });
+    segments.forEach((segment, index) => {
+      segment.set(translations[index]);
+    });
+  } else if (reportProgress && options.onProgress && markdownCodeSegments.length > 0) {
+    options.onProgress({ done: 0, total: 1 });
+  }
+
+  if (markdownCodeSegments.length > 0) {
+    for (const segment of markdownCodeSegments) {
+      const translated = await translateMarkdownInternal(segment.text, options, false);
+      segment.set(normalizeTrailingNewline(segment.text, translated));
+    }
+    if (reportProgress && options.onProgress && segments.length === 0) {
+      options.onProgress({ done: 1, total: 1 });
+    }
+  }
 
   const output = processor.stringify(tree);
 
   return output;
+}
+
+export async function translateMarkdown(source, options) {
+  return translateMarkdownInternal(source, options, true);
 }

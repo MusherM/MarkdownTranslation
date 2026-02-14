@@ -43,6 +43,20 @@ function isMarkdownFile(filePath) {
   return ext === '.md' || ext === '.markdown';
 }
 
+function isTranslatedMarkdownFile(filePath) {
+  return /\.zh\.(md|markdown)$/i.test(path.basename(filePath));
+}
+
+function resolveOptionalPath(baseDir, value) {
+  if (!value) {
+    return value;
+  }
+  if (path.isAbsolute(value)) {
+    return value;
+  }
+  return path.resolve(baseDir, value);
+}
+
 async function collectMarkdownFiles(rootDir) {
   const entries = await fs.readdir(rootDir, { withFileTypes: true });
   const files = [];
@@ -55,7 +69,7 @@ async function collectMarkdownFiles(rootDir) {
     if (entry.isDirectory()) {
       const nested = await collectMarkdownFiles(fullPath);
       files.push(...nested);
-    } else if (entry.isFile() && isMarkdownFile(fullPath)) {
+    } else if (entry.isFile() && isMarkdownFile(fullPath) && !isTranslatedMarkdownFile(fullPath)) {
       files.push(fullPath);
     }
   }
@@ -158,23 +172,34 @@ async function main() {
   }
 
   const { configPath: resolvedConfigPath, config } = await loadConfig(configPath);
-  const promptPath = config.prompt_path
-    ? path.resolve(process.cwd(), config.prompt_path)
+  const configBaseDir = resolvedConfigPath
+    ? path.dirname(path.resolve(resolvedConfigPath))
+    : process.cwd();
+  const runtimeConfig = {
+    ...config,
+    log_path: resolveOptionalPath(configBaseDir, config.log_path),
+    glossary_path: resolveOptionalPath(configBaseDir, config.glossary_path),
+    prompt_path: resolveOptionalPath(configBaseDir, config.prompt_path),
+    judge_prompt_path: resolveOptionalPath(configBaseDir, config.judge_prompt_path)
+  };
+
+  const promptPath = runtimeConfig.prompt_path
+    ? runtimeConfig.prompt_path
     : resolveDefaultPromptPath();
-  const judgePromptPath = config.judge_prompt_path
-    ? path.resolve(process.cwd(), config.judge_prompt_path)
+  const judgePromptPath = runtimeConfig.judge_prompt_path
+    ? runtimeConfig.judge_prompt_path
     : resolveDefaultJudgePromptPath();
 
-  if (!config.api_key) {
+  if (!runtimeConfig.api_key) {
     throw new Error('api_key is required. Set it in config or OPENAI_API_KEY.');
   }
 
   const [glossary, prompt, judgePrompt] = await Promise.all([
-    loadGlossary(config),
+    loadGlossary(runtimeConfig),
     loadPrompt(promptPath),
     loadPrompt(judgePromptPath)
   ]);
-  const logger = createLogger(config.log_path);
+  const logger = createLogger(runtimeConfig.log_path);
 
   const inputStat = await fs.stat(inputPath);
 
@@ -206,7 +231,7 @@ async function main() {
         filePath,
         outputPath: finalOutputPath,
         force,
-        config,
+        config: runtimeConfig,
         glossary,
         prompt,
         judgePrompt,
@@ -236,7 +261,7 @@ async function main() {
     filePath: inputPath,
     outputPath: finalOutputPath,
     force,
-    config,
+    config: runtimeConfig,
     glossary,
     prompt,
     judgePrompt,

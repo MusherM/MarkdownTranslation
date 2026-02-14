@@ -1,0 +1,46 @@
+name: Live Translation Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      openai_base_url:
+        description: Optional override for OPENAI_BASE_URL
+        required: false
+        type: string
+      openai_model:
+        description: Optional override for OPENAI_MODEL
+        required: false
+        type: string
+
+jobs:
+  live-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Dependencies
+        run: npm install --package-lock=false
+
+      - name: Validate Required Secret
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "Missing required repository secret: OPENAI_API_KEY"
+            exit 1
+          fi
+
+      - name: Run Live Translation Test
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ inputs.openai_base_url || secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ inputs.openai_model || secrets.OPENAI_MODEL }}
+        run: npm run test:live

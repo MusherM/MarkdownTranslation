@@ -42,7 +42,12 @@ const files = ref<FileItem[]>([])
 const selectedFileId = ref<string | null>(null)
 const isTranslating = ref(false)
 
-const TRANSLATION_PROMPT = `You are a professional translator specializing in technical documentation.
+function buildTranslationPrompt(translateMarkdownCodeBlocks: boolean): string {
+  const codeBlockRule = translateMarkdownCodeBlocks
+    ? '5. Translate markdown snippets in fenced code blocks when they are marked as markdown (```md/```markdown) or can be confidently parsed as markdown; do not translate non-markdown code blocks or inline code'
+    : '5. Do not translate content inside code blocks or inline code'
+
+  return `You are a professional translator specializing in technical documentation.
 Translate the following English Markdown content to Simplified Chinese.
 
 Requirements:
@@ -50,8 +55,9 @@ Requirements:
 2. Maintain the original document structure
 3. Use professional and accurate technical terminology
 4. Ensure natural and fluent Chinese expression
-5. Do not translate content inside code blocks or inline code
+${codeBlockRule}
 6. Keep all URLs, file paths, and code identifiers unchanged`
+}
 
 const GLOSSARY_JUDGE_PROMPT = `你是术语表合规判定器，负责判断翻译是否可以在未使用术语表的情况下被接受。
 
@@ -173,7 +179,7 @@ async function translateFile(fileItem: FileItem) {
         max_batch_segments: 100
       },
       glossary: glossaryStore.glossary,
-      prompt: TRANSLATION_PROMPT,
+      prompt: buildTranslationPrompt(configStore.config.translateMarkdownCodeBlocks),
       judgePrompt: GLOSSARY_JUDGE_PROMPT,
       translateMarkdownCodeBlocks: configStore.config.translateMarkdownCodeBlocks,
       chatCompletion,
